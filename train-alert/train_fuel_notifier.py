@@ -4,17 +4,18 @@ Company: abhijaysinghlimited
 Target: https://mgtools.cloud/games/train (API: https://api.mgtools.cloud/v1/fuel-price/train)
 Topic: abhijaysinghlimited-train-fuel-alert
 
-Rule:
-1. Morning Briefing (6:00 AM IST): Sent ONCE with the Top 4 lowest times for Fuel AND Spot.
-2. Exact-Time Alerts:
-   - 4 chances for Fuel: Alert sent at the EXACT times of the Top 4 lowest Fuel prices.
-   - 4 chances for Spot: Alert sent at the EXACT times of the Top 4 lowest Spot prices.
+Deduplication Rule:
+- Morning briefing is sent ONCE per day.
+- The 4 Fuel & 4 Spot alerts are scheduled ONCE per day.
+- Subsequent runs on the same day skip duplicate scheduling and briefing.
 """
 
 import requests
 import datetime
 import time
 import sys
+import os
+import json
 from zoneinfo import ZoneInfo
 
 # Ensure UTF-8 output in Windows terminal
@@ -28,7 +29,28 @@ NTFY_TOPIC = "abhijaysinghlimited-train-fuel-alert"
 TIMEZONE_NAME = "Asia/Kolkata"
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 
+STATE_FILE = os.path.join(os.path.dirname(__file__), "train_state.json")
 API_URL = "https://api.mgtools.cloud/v1/fuel-price/train"
+
+
+def load_state() -> dict:
+    """Load persistent state."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"last_processed_date": None}
+
+
+def save_state(state: dict):
+    """Save persistent state."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"[!] Warning: Could not save state: {e}")
 
 
 def clean_time(time_str: str) -> str:
@@ -185,14 +207,23 @@ def schedule_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime):
         else:
             print(f"  [-] Spot Alert #{rank}: {time_12h} has already passed today.")
 
-    print(f"\n[OK] Scheduled {fuel_scheduled} Fuel alerts and {spot_scheduled} Spot alerts (Total: at most 4 each).")
+    print(f"\n[OK] Scheduled {fuel_scheduled} Fuel alerts and {spot_scheduled} Spot alerts.")
 
 
 def main():
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
+    today_str = now.strftime("%Y-%m-%d")
     today_day_str = str(now.day)
     
+    state = load_state()
+
+    # Deduplication check: if already processed today and not forced, skip!
+    if state.get("last_processed_date") == today_str and "--force" not in sys.argv:
+        print(f"[OK] Train Manager briefing & alerts for today ({today_str}) have already been scheduled.")
+        print("     Zero duplicates sent. (Use --force to override).")
+        return
+
     print(f"=====================================================")
     print(f" Train Manager Notifier - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
@@ -241,7 +272,11 @@ def main():
     # 2. Schedule exact-time alerts: 4 for Fuel + 4 for Spot
     schedule_alerts(top_4_fuel, top_4_spot, now)
 
-    print("\n[OK] Train Manager Notifier completed successfully.")
+    # Save processed state for today
+    state["last_processed_date"] = today_str
+    save_state(state)
+
+    print("\n[OK] Train Manager Notifier completed successfully (State saved).")
 
 
 if __name__ == "__main__":
