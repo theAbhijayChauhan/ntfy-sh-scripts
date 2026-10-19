@@ -4,7 +4,6 @@ on:
   schedule:
     # 00:30 UTC = 06:00 AM IST (Indian Standard Time: UTC+5:30)
     - cron: '30 0 * * *'
-  # Allows manual execution anytime via GitHub Actions UI
   workflow_dispatch:
 
 jobs:
@@ -13,6 +12,16 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Restore daily state cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            train-alert/train_state.json
+            truck-alert/truck_state.json
+          key: daily-sched-state-${{ github.run_id }}
+          restore-keys: |
+            daily-sched-state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
