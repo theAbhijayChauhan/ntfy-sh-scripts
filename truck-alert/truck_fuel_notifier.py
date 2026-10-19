@@ -4,18 +4,18 @@ Company: abhijaysinghlimited
 Target: https://mgtools.cloud/games/truck (API: https://api.mgtools.cloud/v1/fuel-price/truck)
 Topic: abhijaysinghlimited-truck-fuel-alert
 
-Rule:
-1. Morning Briefing (6:00 AM IST): Sent ONCE with the Top 4 lowest times for Diesel, CO2, and kWh.
-2. Exact-Time Alerts:
-   - 4 chances for Diesel: Alert sent at the EXACT times of the Top 4 lowest Diesel prices.
-   - 4 chances for CO2: Alert sent at the EXACT times of the Top 4 lowest CO2 prices.
-   - 4 chances for kWh: Alert sent at the EXACT times of the Top 4 lowest kWh prices.
+Deduplication Rule:
+- Morning briefing is sent ONCE per day.
+- The 4 Diesel, 4 CO2, and 4 kWh alerts are scheduled ONCE per day.
+- Subsequent runs on the same day skip duplicate scheduling and briefing.
 """
 
 import requests
 import datetime
 import time
 import sys
+import os
+import json
 from zoneinfo import ZoneInfo
 
 # Ensure UTF-8 output in Windows terminal
@@ -29,7 +29,28 @@ NTFY_TOPIC = "abhijaysinghlimited-truck-fuel-alert"
 TIMEZONE_NAME = "Asia/Kolkata"
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 
+STATE_FILE = os.path.join(os.path.dirname(__file__), "truck_state.json")
 API_URL = "https://api.mgtools.cloud/v1/fuel-price/truck"
+
+
+def load_state() -> dict:
+    """Load persistent state."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"last_processed_date": None}
+
+
+def save_state(state: dict):
+    """Save persistent state."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"[!] Warning: Could not save state: {e}")
 
 
 def clean_time(time_str: str) -> str:
@@ -122,9 +143,9 @@ def build_morning_briefing(top_4_diesel: list, top_4_co2: list, top_4_kwh: list,
 def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: datetime.datetime):
     """
     Schedule exact-time push alerts via ntfy.sh:
-    - 4 chances for Diesel: Alert sent at the exact time of Top 4 lowest Diesel prices.
-    - 4 chances for CO2: Alert sent at the exact time of Top 4 lowest CO2 prices.
-    - 4 chances for kWh: Alert sent at the exact time of Top 4 lowest kWh prices.
+    - 4 chances for Diesel
+    - 4 chances for CO2
+    - 4 chances for kWh
     """
     now_ts = int(now.timestamp())
     medals = ["🥇", "🥈", "🥉", "4th"]
@@ -218,14 +239,23 @@ def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: d
         else:
             print(f"  [-] kWh Alert #{rank}: {time_12h} has already passed today.")
 
-    print(f"\n[OK] Scheduled: {d_count} Diesel, {c_count} CO2, {k_count} kWh alerts (Total: at most 4 each).")
+    print(f"\n[OK] Scheduled: {d_count} Diesel, {c_count} CO2, {k_count} kWh alerts.")
 
 
 def main():
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
+    today_str = now.strftime("%Y-%m-%d")
     today_day_str = str(now.day)
     
+    state = load_state()
+
+    # Deduplication check: if already processed today and not forced, skip!
+    if state.get("last_processed_date") == today_str and "--force" not in sys.argv:
+        print(f"[OK] Truck Manager briefing & alerts for today ({today_str}) have already been scheduled.")
+        print("     Zero duplicates sent. (Use --force to override).")
+        return
+
     print(f"=====================================================")
     print(f" Truck Manager Notifier - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
@@ -275,7 +305,11 @@ def main():
     # 2. Schedule exact-time alerts: 4 for Diesel + 4 for CO2 + 4 for kWh
     schedule_alerts(top_4_diesel, top_4_co2, top_4_kwh, now)
 
-    print("\n[OK] Truck Manager Notifier completed successfully.")
+    # Save processed state for today
+    state["last_processed_date"] = today_str
+    save_state(state)
+
+    print("\n[OK] Truck Manager Notifier completed successfully (State saved).")
 
 
 if __name__ == "__main__":
