@@ -2,8 +2,10 @@ name: Daily Morning Briefing & 4-Chance Scheduler (Train & Truck)
 
 on:
   schedule:
-    # 00:30 UTC = 06:00 AM IST (Indian Standard Time: UTC+5:30)
-    - cron: '30 0 * * *'
+    # 00:23 UTC = 05:53 AM IST & 00:37 UTC = 06:07 AM IST
+    # Dual-schedule with off-peak minutes prevents GitHub Actions queue drops and delays
+    - cron: '23 0 * * *'
+    - cron: '37 0 * * *'
   workflow_dispatch:
 
 jobs:

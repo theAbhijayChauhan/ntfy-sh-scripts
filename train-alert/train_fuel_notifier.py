@@ -1,13 +1,13 @@
 """
-Train Manager - Daily Fuel & Spot Price Tracker + Scheduler
-Company: abhijaysinghlimited
-Target: https://mgtools.cloud/games/train (API: https://api.mgtools.cloud/v1/fuel-price/train)
-Topic: abhijaysinghlimited-train-fuel-alert
+🚆 Train Manager - Daily Fuel & Spot Price Tracker + Scheduler
+🏢 Company: abhijaysinghlimited
+🎯 Target: https://mgtools.cloud/games/train (API: https://api.mgtools.cloud/v1/fuel-price/train)
+🔔 Topic: abhijaysinghlimited-train-fuel-alert
 
-Deduplication Rule:
-- Morning briefing is sent ONCE per day.
-- The 4 Fuel & 4 Spot alerts are scheduled ONCE per day.
-- Subsequent runs on the same day skip duplicate scheduling and briefing.
+✨ Features:
+1. Morning Briefing: Beautiful emoji-rich summary of the Top 4 cheapest Fuel & Spot times.
+2. Exact-Time Alerts: Pre-scheduled via ntfy.sh to buzz phone at the 4 lowest Fuel + 4 lowest Spot times.
+3. Deduplication: Briefing & scheduler run once per day (zero spam).
 """
 
 import requests
@@ -64,7 +64,7 @@ def to_12h(time_str: str) -> str:
     cleaned = clean_time(time_str)
     dt = datetime.datetime.strptime(cleaned, "%H:%M")
     formatted = dt.strftime("%I:%M %p")
-    return f"{formatted} [NOW]" if is_current else formatted
+    return f"{formatted} ⚡[NOW]" if is_current else formatted
 
 
 def get_slot_datetime(time_str: str, now: datetime.datetime) -> datetime.datetime:
@@ -110,28 +110,42 @@ def send_to_ntfy(topic: str, message: str, title: str, tags: str = "train,fuelpu
 def build_morning_briefing(top_4_fuel: list, top_4_spot: list, now: datetime.datetime) -> str:
     """
     Build the Morning Briefing:
-    Shows the Top 4 Best Times of the Day to buy Fuel and Top 4 Best Times to buy Spot.
+    Stunning emoji layout showing Top 4 Best Times to buy Fuel & Spot.
     """
     date_str = now.strftime("%A, %d %B %Y")
+    current_time_12h = now.strftime("%I:%M %p")
     medals = ["🥇", "🥈", "🥉", "4️⃣"]
-    
+    badges_fuel = ["🟢 BEST DEAL", "⭐ GREAT PRICE", "💰 LOW DROP", "📉 GOOD TIME"]
+    badges_spot = ["🟢 BEST SPOT", "⭐ GREAT RATE", "⚡ LOW PEAK", "📉 GOOD SPOT"]
+
     lines = [
-        f"**🚆 Train Manager Daily Briefing**",
-        f"📅 *{date_str} (IST)*\n",
-        "⛽ **TOP 4 BEST TIMES TO BUY FUEL TODAY:**"
+        "🚆 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚆",
+        "       TRAIN MANAGER • DAILY BRIEFING",
+        "             abhijaysinghlimited",
+        "🚆 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚆",
+        f"📅 **Date:** {date_str} | ⏰ **Time:** {current_time_12h} IST",
+        "🎯 **Radar:** 24-Hour Automated Price Forecaster",
+        "",
+        "⛽ ━━━ 🏆 TOP 4 LOWEST FUEL DROPS ━━━ ⛽"
     ]
     
     for i, item in enumerate(top_4_fuel):
         m = medals[i] if i < len(medals) else f"#{i+1}"
-        lines.append(f"{m} **{to_12h(item['time'])}**: **${item['fuel']:,}** (Spot: ${item.get('spot', 'N/A'):,})")
+        b = badges_fuel[i] if i < len(badges_fuel) else "🏷️ DISCOUNT"
+        lines.append(f"{m} **{to_12h(item['time'])}** ➜ **${item['fuel']:,}** *(Spot: ${item.get('spot', 'N/A'):,})* {b}")
 
-    lines.append("\n⚡ **TOP 4 BEST TIMES TO BUY SPOT TODAY:**")
+    lines.append("")
+    lines.append("⚡ ━━━ ⚡ TOP 4 LOWEST SPOT DROPS ━━━ ⚡")
     for i, item in enumerate(top_4_spot):
         m = medals[i] if i < len(medals) else f"#{i+1}"
-        lines.append(f"{m} **{to_12h(item['time'])}**: **${item['spot']:,}** (Fuel: ${item.get('fuel', 'N/A'):,})")
+        b = badges_spot[i] if i < len(badges_spot) else "🏷️ DISCOUNT"
+        lines.append(f"{m} **{to_12h(item['time'])}** ➜ **${item['spot']:,}** *(Fuel: ${item.get('fuel', 'N/A'):,})* {b}")
 
-    lines.append("\n" + "—" * 28)
-    lines.append("⏰ *You will receive alerts at the 4 lowest Fuel times + 4 lowest Spot times.*")
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🔔 **AUTO-ALERTS SCHEDULED:**")
+    lines.append("📱 You will receive **4 Fuel + 4 Spot** live push alerts directly on your phone lock screen at the exact minutes above!")
+    lines.append("🎮 *Open Train Manager when the alert buzzes to maximize profit!*")
 
     return "\n".join(lines)
 
@@ -143,7 +157,7 @@ def schedule_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime):
     - 4 chances for Spot: Alert sent at the exact time of the Top 4 lowest spot prices.
     """
     now_ts = int(now.timestamp())
-    medals = ["🥇", "🥈", "🥉", "4th"]
+    medals = ["🥇 #1 Lowest Today!", "🥈 #2 Lowest Today!", "🥉 #3 Lowest Today!", "4️⃣ #4 Lowest Today!"]
     fuel_scheduled = 0
     spot_scheduled = 0
 
@@ -154,15 +168,21 @@ def schedule_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime):
         time_12h = to_12h(item["time"])
         
         if slot_ts > now_ts:
-            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
+            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank} Rank"
             alert_msg = (
-                f"⛽ **CHEAPEST FUEL ALERT! BUY NOW!**\n\n"
-                f"• Time: **{time_12h}**\n"
-                f"• Fuel Price: **${item['fuel']:,}** ({medal_label} best fuel price today)\n"
-                f"• Spot Price: **${item.get('spot', 'N/A'):,}**\n\n"
-                f"👉 Open Train Manager and stock up your fuel tanks now!"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"       ⛽ BUY FUEL QUICKLY • CHEAPEST NOW!\n"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
+                f"💰 **Fuel Price:** **${item['fuel']:,}** ({medal_label})\n"
+                f"⚡ **Spot Price:** ${item.get('spot', 'N/A'):,}\n"
+                f"🏢 **Company:** abhijaysinghlimited\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                f"Fuel price has reached its rock bottom window!\n"
+                f"👉 Open **Train Manager** right now and stock up your train tanks!"
             )
-            title = f"BUY FUEL NOW: ${item['fuel']:,} at {time_12h}"
+            title = f"BUY FUEL QUICKLY: ${item['fuel']:,} at {time_12h}"
             success = send_to_ntfy(
                 topic=NTFY_TOPIC,
                 message=alert_msg,
@@ -184,15 +204,21 @@ def schedule_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime):
         time_12h = to_12h(item["time"])
         
         if slot_ts > now_ts:
-            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
+            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank} Rank"
             alert_msg = (
-                f"⚡ **CHEAPEST SPOT ALERT! BUY NOW!**\n\n"
-                f"• Time: **{time_12h}**\n"
-                f"• Spot Price: **${item['spot']:,}** ({medal_label} best spot price today)\n"
-                f"• Fuel Price: **${item.get('fuel', 'N/A'):,}**\n\n"
-                f"👉 Open Train Manager and buy spot power now!"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"       ⚡ BUY SPOT POWER QUICKLY!\n"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
+                f"⚡ **Spot Price:** **${item['spot']:,}** ({medal_label})\n"
+                f"⛽ **Fuel Price:** ${item.get('fuel', 'N/A'):,}\n"
+                f"🏢 **Company:** abhijaysinghlimited\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                f"Spot electricity is at its cheapest rate today!\n"
+                f"👉 Open **Train Manager** right now and buy spot power!"
             )
-            title = f"BUY SPOT NOW: ${item['spot']:,} at {time_12h}"
+            title = f"BUY SPOT QUICKLY: ${item['spot']:,} at {time_12h}"
             success = send_to_ntfy(
                 topic=NTFY_TOPIC,
                 message=alert_msg,
@@ -225,7 +251,7 @@ def main():
         return
 
     print(f"=====================================================")
-    print(f" Train Manager Notifier - abhijaysinghlimited")
+    print(f" 🚆 Train Manager Notifier - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     print(f" ntfy Topic   : {NTFY_TOPIC}")
     print(f"=====================================================\n")
@@ -260,8 +286,8 @@ def main():
     sent = send_to_ntfy(
         topic=NTFY_TOPIC,
         message=briefing_msg,
-        title=f"Train Manager: Top 4 Fuel & Spot Times ({current_time_12h})",
-        tags="train,clipboard,fuelpump",
+        title=f"Train Manager: Daily Fuel & Spot Briefing ({current_time_12h})",
+        tags="train,clipboard,fuelpump,sparkles",
         priority="default"
     )
     if sent:

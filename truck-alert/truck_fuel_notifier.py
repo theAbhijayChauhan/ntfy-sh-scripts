@@ -1,13 +1,13 @@
 """
-Truck Manager - Daily Fuel (Diesel, CO2, kWh) Price Tracker + Scheduler
-Company: abhijaysinghlimited
-Target: https://mgtools.cloud/games/truck (API: https://api.mgtools.cloud/v1/fuel-price/truck)
-Topic: abhijaysinghlimited-truck-fuel-alert
+🚛 Truck Manager - Daily Fuel (Diesel, CO2, kWh) Price Tracker + Scheduler
+🏢 Company: abhijaysinghlimited
+🎯 Target: https://mgtools.cloud/games/truck (API: https://api.mgtools.cloud/v1/fuel-price/truck)
+🔔 Topic: abhijaysinghlimited-truck-fuel-alert
 
-Deduplication Rule:
-- Morning briefing is sent ONCE per day.
-- The 4 Diesel, 4 CO2, and 4 kWh alerts are scheduled ONCE per day.
-- Subsequent runs on the same day skip duplicate scheduling and briefing.
+✨ Features:
+1. Morning Briefing: Beautiful emoji layout showing the Top 4 cheapest Diesel, CO2, and kWh electricity times.
+2. Exact-Time Alerts: Pre-scheduled via ntfy.sh to buzz phone at the 4 lowest Diesel + 4 lowest CO2 + 4 lowest kWh times.
+3. Deduplication: Briefing & scheduler run once per day (zero spam).
 """
 
 import requests
@@ -64,7 +64,7 @@ def to_12h(time_str: str) -> str:
     cleaned = clean_time(time_str)
     dt = datetime.datetime.strptime(cleaned, "%H:%M")
     formatted = dt.strftime("%I:%M %p")
-    return f"{formatted} [NOW]" if is_current else formatted
+    return f"{formatted} ⚡[NOW]" if is_current else formatted
 
 
 def get_slot_datetime(time_str: str, now: datetime.datetime) -> datetime.datetime:
@@ -110,32 +110,49 @@ def send_to_ntfy(topic: str, message: str, title: str, tags: str = "truck,fuelpu
 def build_morning_briefing(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: datetime.datetime) -> str:
     """
     Build the Morning Briefing:
-    Shows Top 4 Best Times for Diesel, CO2, and kWh.
+    Stunning emoji layout showing Top 4 Best Times for Diesel, CO2, and kWh.
     """
     date_str = now.strftime("%A, %d %B %Y")
+    current_time_12h = now.strftime("%I:%M %p")
     medals = ["🥇", "🥈", "🥉", "4️⃣"]
-    
+    badges_diesel = ["🟢 BEST DIESEL", "⭐ GREAT PRICE", "💰 LOW DIP", "📉 GOOD TIME"]
+    badges_co2 = ["🟢 LOWEST CO2", "⭐ GREAT RATE", "🌿 CHEAP QUOTA", "📉 FAIR RATE"]
+    badges_kwh = ["🟢 LOWEST RATE", "⚡ OFF-PEAK", "🔋 MID-DAY DIP", "🔌 GOOD CHARGE"]
+
     lines = [
-        f"**🚛 Truck Manager Daily Briefing**",
-        f"📅 *{date_str} (IST)*\n",
-        "⛽ **TOP 4 BEST TIMES TO BUY DIESEL TODAY:**"
+        "🚛 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚛",
+        "       TRUCK MANAGER • DAILY BRIEFING",
+        "             abhijaysinghlimited",
+        "🚛 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚛",
+        f"📅 **Date:** {date_str} | ⏰ **Time:** {current_time_12h} IST",
+        "🎯 **Radar:** 24-Hour Automated Fleet Forecaster",
+        "",
+        "⛽ ━━━ 🏆 TOP 4 DIESEL DROPS ━━━ ⛽"
     ]
     for i, item in enumerate(top_4_diesel):
         m = medals[i] if i < len(medals) else f"#{i+1}"
-        lines.append(f"{m} **{to_12h(item['time'])}**: **${item['diesel']}** (CO2: ${item.get('co2', 'N/A')}, kWh: ${item.get('kwh', 'N/A')})")
+        b = badges_diesel[i] if i < len(badges_diesel) else "🏷️ DISCOUNT"
+        lines.append(f"{m} **{to_12h(item['time'])}** ➜ **${item['diesel']}** *(CO2: ${item.get('co2', 'N/A')}, kWh: ${item.get('kwh', 'N/A')})* {b}")
 
-    lines.append("\n🍃 **TOP 4 BEST TIMES TO BUY CO2 TODAY:**")
+    lines.append("")
+    lines.append("🍃 ━━━ 🍃 TOP 4 CO2 QUOTA DROPS ━━━ 🍃")
     for i, item in enumerate(top_4_co2):
         m = medals[i] if i < len(medals) else f"#{i+1}"
-        lines.append(f"{m} **{to_12h(item['time'])}**: **${item['co2']}**")
+        b = badges_co2[i] if i < len(badges_co2) else "🏷️ DISCOUNT"
+        lines.append(f"{m} **{to_12h(item['time'])}** ➜ **${item['co2']}** {b}")
 
-    lines.append("\n⚡ **TOP 4 BEST TIMES TO CHARGE KWH TODAY:**")
+    lines.append("")
+    lines.append("⚡ ━━━ ⚡ TOP 4 KWH ELECTRICITY DROPS ━━━ ⚡")
     for i, item in enumerate(top_4_kwh):
         m = medals[i] if i < len(medals) else f"#{i+1}"
-        lines.append(f"{m} **{to_12h(item['time'])}**: **${item['kwh']}**")
+        b = badges_kwh[i] if i < len(badges_kwh) else "🏷️ DISCOUNT"
+        lines.append(f"{m} **{to_12h(item['time'])}** ➜ **${item['kwh']}** {b}")
 
-    lines.append("\n" + "—" * 28)
-    lines.append("⏰ *You will receive alerts at the 4 lowest Diesel + 4 lowest CO2 + 4 lowest kWh times.*")
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🔔 **AUTO-ALERTS SCHEDULED:**")
+    lines.append("📱 You will receive **4 Diesel + 4 CO2 + 4 kWh** live push alerts directly on your phone lock screen at each exact minute above!")
+    lines.append("🎮 *Open Truck Manager when the alert buzzes to stock up!*")
 
     return "\n".join(lines)
 
@@ -148,7 +165,7 @@ def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: d
     - 4 chances for kWh
     """
     now_ts = int(now.timestamp())
-    medals = ["🥇", "🥈", "🥉", "4th"]
+    medals = ["🥇 #1 Lowest Today!", "🥈 #2 Lowest Today!", "🥉 #3 Lowest Today!", "4️⃣ #4 Lowest Today!"]
     d_count, c_count, k_count = 0, 0, 0
 
     print("\n[*] Scheduling Alerts for Top 4 Lowest Diesel Drops:")
@@ -158,15 +175,21 @@ def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: d
         time_12h = to_12h(item["time"])
         
         if slot_ts > now_ts:
-            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
+            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank} Rank"
             alert_msg = (
-                f"⛽ **CHEAPEST DIESEL ALERT! BUY NOW!**\n\n"
-                f"• Time: **{time_12h}**\n"
-                f"• Diesel Price: **${item['diesel']}** ({medal_label} best diesel price today)\n"
-                f"• CO2: **${item.get('co2', 'N/A')}** | kWh: **${item.get('kwh', 'N/A')}**\n\n"
-                f"👉 Open Truck Manager and fuel your fleet now!"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"       ⛽ BUY DIESEL QUICKLY • CHEAPEST NOW!\n"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
+                f"💰 **Diesel Price:** **${item['diesel']}** ({medal_label})\n"
+                f"🍃 **CO2:** ${item.get('co2', 'N/A')} | ⚡ **kWh:** ${item.get('kwh', 'N/A')}\n"
+                f"🏢 **Company:** abhijaysinghlimited\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                f"Diesel prices are at their lowest point for this window!\n"
+                f"👉 Open **Truck Manager** right now and fuel your fleet tanks!"
             )
-            title = f"BUY DIESEL NOW: ${item['diesel']} at {time_12h}"
+            title = f"BUY DIESEL QUICKLY: ${item['diesel']} at {time_12h}"
             success = send_to_ntfy(
                 topic=NTFY_TOPIC,
                 message=alert_msg,
@@ -188,14 +211,20 @@ def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: d
         time_12h = to_12h(item["time"])
         
         if slot_ts > now_ts:
-            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
+            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank} Rank"
             alert_msg = (
-                f"🍃 **CHEAPEST CO2 QUOTA ALERT! BUY NOW!**\n\n"
-                f"• Time: **{time_12h}**\n"
-                f"• CO2 Price: **${item['co2']}** ({medal_label} best CO2 price today)\n\n"
-                f"👉 Open Truck Manager and stock up CO2 quotas now!"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"       🍃 BUY CO2 QUOTAS QUICKLY!\n"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
+                f"🌿 **CO2 Price:** **${item['co2']}** ({medal_label})\n"
+                f"🏢 **Company:** abhijaysinghlimited\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                f"CO2 quota prices have dropped significantly!\n"
+                f"👉 Open **Truck Manager** right now and buy cheap CO2 quotas!"
             )
-            title = f"BUY CO2 NOW: ${item['co2']} at {time_12h}"
+            title = f"BUY CO2 QUICKLY: ${item['co2']} at {time_12h}"
             success = send_to_ntfy(
                 topic=NTFY_TOPIC,
                 message=alert_msg,
@@ -217,14 +246,20 @@ def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: d
         time_12h = to_12h(item["time"])
         
         if slot_ts > now_ts:
-            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
+            medal_label = medals[rank - 1] if rank <= len(medals) else f"#{rank} Rank"
             alert_msg = (
-                f"⚡ **CHEAPEST KWH ELECTRICITY ALERT! CHARGE NOW!**\n\n"
-                f"• Time: **{time_12h}**\n"
-                f"• kWh Price: **${item['kwh']}** ({medal_label} best electricity rate today)\n\n"
-                f"👉 Open Truck Manager and charge your electric fleet now!"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"       ⚡ CHARGE KWH FLEET QUICKLY!\n"
+                f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
+                f"🔋 **kWh Price:** **${item['kwh']}** ({medal_label})\n"
+                f"🏢 **Company:** abhijaysinghlimited\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                f"Electricity rate is at rock bottom!\n"
+                f"👉 Open **Truck Manager** right now and recharge your electric trucks!"
             )
-            title = f"BUY KWH NOW: ${item['kwh']} at {time_12h}"
+            title = f"BUY KWH QUICKLY: ${item['kwh']} at {time_12h}"
             success = send_to_ntfy(
                 topic=NTFY_TOPIC,
                 message=alert_msg,
@@ -257,7 +292,7 @@ def main():
         return
 
     print(f"=====================================================")
-    print(f" Truck Manager Notifier - abhijaysinghlimited")
+    print(f" 🚛 Truck Manager Notifier - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     print(f" ntfy Topic   : {NTFY_TOPIC}")
     print(f"=====================================================\n")
@@ -293,8 +328,8 @@ def main():
     sent = send_to_ntfy(
         topic=NTFY_TOPIC,
         message=briefing_msg,
-        title=f"Truck Manager: Top 4 Times for Diesel, CO2, kWh ({current_time_12h})",
-        tags="truck,clipboard,fuelpump",
+        title=f"Truck Manager: Daily Fuel & Energy Briefing ({current_time_12h})",
+        tags="truck,clipboard,fuelpump,sparkles",
         priority="default"
     )
     if sent:

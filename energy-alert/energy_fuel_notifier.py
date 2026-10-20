@@ -1,14 +1,18 @@
 """
-Energy Manager - Hourly Live Market Tracker & Emergency Alerts
-Company: abhijaysinghlimited
-Source: https://energymanagergame.com/ (Official Game Web Client)
-Topic: abhijaysinghlimited-energy-fuel-alert
+⚡ Energy Manager - Hourly Live Market Tracker & Emergency Alerts
+🏢 Company: abhijaysinghlimited
+🎯 Source: https://energymanagergame.com/ (Official Game Web Client)
+🔔 Topic: abhijaysinghlimited-energy-fuel-alert
 
-Deduplication Rule:
-- Each price dip triggers an emergency alert ONCE ONLY.
-- Will NOT send duplicate alerts on subsequent hours if price remains low.
-- State resets only when the price recovers above the threshold.
-- Morning briefing is sent ONCE per day.
+✨ Features:
+1. Daily Market Briefing: Sent on the first run of every morning with live prices and target comparisons.
+2. Hourly Price Radar: Checks prices every hour.
+3. Strict Emergency Thresholds:
+   - 🛢️ Oil < $1.90 ➜ BUY OIL QUICKLY
+   - 🪨 Coal < $1.50 ➜ BUY COAL QUICKLY
+   - 💧 Hydrogen > $90.00+ ➜ SELL HYDROGEN QUICKLY
+   - 🍃 CO2 Quotas < $20.00 ➜ BUY CO2 QUICKLY
+4. Deduplication: Alerts sent ONCE per price dip (zero repeated spam).
 """
 
 import requests
@@ -144,28 +148,44 @@ def send_to_ntfy(topic: str, message: str, title: str, tags: str = "factory,fuel
 
 def build_morning_briefing(market: dict, now: datetime.datetime) -> str:
     """
-    Build the 6:30 AM Morning Briefing showing opening commodity market status.
+    Build the Morning Briefing showing opening commodity market status.
     """
     date_str = now.strftime("%A, %d %B %Y")
     current_time_12h = now.strftime("%I:%M %p")
     
     lines = [
-        f"**⚡ Energy Manager Morning Briefing**",
-        f"📅 *{date_str} at {current_time_12h} (IST)*\n",
-        "📊 **CURRENT COMMODITY MARKET PRICES:**"
+        "⚡ ━━━━━━━━━━━━━━━━━━━━━━━━━ ⚡",
+        "      ENERGY MANAGER • MARKET BRIEFING",
+        "             abhijaysinghlimited",
+        "⚡ ━━━━━━━━━━━━━━━━━━━━━━━━━ ⚡",
+        f"📅 **Date:** {date_str} | ⏰ **Time:** {current_time_12h} IST",
+        f"📡 **Account:** `{EM_EMAIL}`",
+        "",
+        "📊 ━━━ 🌐 LIVE COMMODITY SNAPSHOT ━━━ 📊"
     ]
     
     if "oil" in market:
-        lines.append(f"• 🛢️ **Oil:** **${market['oil']['current']:.2f}** (Target: < ${OIL_BUY_THRESHOLD:.2f})")
+        curr = market['oil']['current']
+        status = "🟢 CRITICAL BUY!" if curr < OIL_BUY_THRESHOLD else "⏳ NORMAL"
+        lines.append(f"• 🛢️ **Oil:** **${curr:.2f}** *(Target: < ${OIL_BUY_THRESHOLD:.2f})* {status}")
     if "coal" in market:
-        lines.append(f"• 🪨 **Coal:** **${market['coal']['current']:.2f}** (Target: < ${COAL_BUY_THRESHOLD:.2f})")
+        curr = market['coal']['current']
+        status = "🟢 CRITICAL BUY!" if curr < COAL_BUY_THRESHOLD else "⏳ NORMAL"
+        lines.append(f"• 🪨 **Coal:** **${curr:.2f}** *(Target: < ${COAL_BUY_THRESHOLD:.2f})* {status}")
     if "hydrogen" in market:
-        lines.append(f"• 💧 **Hydrogen:** **${market['hydrogen']['current']:.2f}** (Peak Target: > ${HYDROGEN_SELL_THRESHOLD:.2f}+)")
+        curr = market['hydrogen']['current']
+        status = "🚀 PEAK SELL!" if curr > HYDROGEN_SELL_THRESHOLD else "⏳ HOLDING"
+        lines.append(f"• 💧 **Hydrogen:** **${curr:.2f}** *(Target: > ${HYDROGEN_SELL_THRESHOLD:.2f}+)* {status}")
     if "co2" in market:
-        lines.append(f"• 🍃 **CO2 Quota:** **${market['co2']['current']:.2f}** (Target: < ${CO2_BUY_THRESHOLD:.2f})")
+        curr = market['co2']['current']
+        status = "🟢 CRITICAL BUY!" if curr < CO2_BUY_THRESHOLD else "⏳ NORMAL"
+        lines.append(f"• 🍃 **CO2 Quota:** **${curr:.2f}** *(Target: < ${CO2_BUY_THRESHOLD:.2f})* {status}")
 
-    lines.append("\n" + "—" * 28)
-    lines.append("🚨 *Hourly checks active: Emergency alert will be sent ONCE per price dip.*")
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🚨 **24/7 HOURLY RADAR ACTIVE:**")
+    lines.append("📱 Whenever any commodity drops below target (or Hydrogen spikes > $90+), an **EMERGENCY alert** will buzz your phone ONCE per dip!")
+    lines.append("🎮 *Happy energy trading!*")
 
     return "\n".join(lines)
 
@@ -178,17 +198,24 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
     - Hydrogen > $90.00
     - CO2 < $20.00
     """
-    # 1. Oil Condition
+    # 1. Oil Condition (< $1.90)
     if "oil" in market:
         oil_price = market["oil"]["current"]
         if oil_price < OIL_BUY_THRESHOLD:
             if not state.get("oil_alerted", False):
                 title = f"BUY OIL QUICKLY (${oil_price:.2f})"
                 msg = (
-                    f"🚨 **EMERGENCY ALERT: BUY OIL QUICKLY!**\n\n"
-                    f"• Time: **{current_time_12h}**\n"
-                    f"• Current Oil Price: **${oil_price:.2f}** (Below target < ${OIL_BUY_THRESHOLD:.2f})!\n\n"
-                    f"👉 Open Energy Manager right now and purchase oil for your power plants!"
+                    f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                    f"          🛢️ BUY OIL QUICKLY! CRASH DETECTED!\n"
+                    f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                    f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n"
+                    f"💰 **Current Price:** **${oil_price:.2f}** *(Below Target < ${OIL_BUY_THRESHOLD:.2f})*\n"
+                    f"📉 **Market Status:** ROCK BOTTOM BUY WINDOW\n"
+                    f"🏢 **Account:** `{EM_EMAIL}`\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                    f"Oil price has crashed below your buy threshold!\n"
+                    f"👉 Open **Energy Manager** right now and purchase full oil reserves!"
                 )
                 if send_to_ntfy(NTFY_TOPIC, msg, title, tags="rotating_light,fuelpump,warning", priority="urgent"):
                     print(f"  [OK] Alert Sent: BUY OIL QUICKLY (${oil_price:.2f})")
@@ -200,17 +227,24 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
                 print(f"  [+] Oil price has recovered (${oil_price:.2f}). Resetting alert state.")
                 state["oil_alerted"] = False
 
-    # 2. Coal Condition
+    # 2. Coal Condition (< $1.50)
     if "coal" in market:
         coal_price = market["coal"]["current"]
         if coal_price < COAL_BUY_THRESHOLD:
             if not state.get("coal_alerted", False):
                 title = f"BUY COAL QUICKLY (${coal_price:.2f})"
                 msg = (
-                    f"🚨 **EMERGENCY ALERT: BUY COAL QUICKLY!**\n\n"
-                    f"• Time: **{current_time_12h}**\n"
-                    f"• Current Coal Price: **${coal_price:.2f}** (Below target < ${COAL_BUY_THRESHOLD:.2f})!\n\n"
-                    f"👉 Open Energy Manager right now and stock up coal for your power plants!"
+                    f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                    f"          🪨 BUY COAL QUICKLY! CRASH DETECTED!\n"
+                    f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                    f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n"
+                    f"💰 **Current Price:** **${coal_price:.2f}** *(Below Target < ${COAL_BUY_THRESHOLD:.2f})*\n"
+                    f"📉 **Market Status:** ROCK BOTTOM BUY WINDOW\n"
+                    f"🏢 **Account:** `{EM_EMAIL}`\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                    f"Coal price has crashed below your buy threshold!\n"
+                    f"👉 Open **Energy Manager** right now and stock up coal reserves!"
                 )
                 if send_to_ntfy(NTFY_TOPIC, msg, title, tags="rotating_light,fire,warning", priority="urgent"):
                     print(f"  [OK] Alert Sent: BUY COAL QUICKLY (${coal_price:.2f})")
@@ -222,17 +256,24 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
                 print(f"  [+] Coal price has recovered (${coal_price:.2f}). Resetting alert state.")
                 state["coal_alerted"] = False
 
-    # 3. Hydrogen Condition
+    # 3. Hydrogen Condition (> $90.00+)
     if "hydrogen" in market:
         h2_price = market["hydrogen"]["current"]
         if h2_price > HYDROGEN_SELL_THRESHOLD:
             if not state.get("hydrogen_alerted", False):
                 title = f"SELL HYDROGEN QUICKLY (${h2_price:.2f})"
                 msg = (
-                    f"🚨 **EMERGENCY ALERT: SELL HYDROGEN QUICKLY!**\n\n"
-                    f"• Time: **{current_time_12h}**\n"
-                    f"• Market Value: **${h2_price:.2f}** (PEAK above > ${HYDROGEN_SELL_THRESHOLD:.2f}+)!\n\n"
-                    f"👉 Open Hydrogen Exchange (hydrogen-exchange.php) and SELL stored hydrogen now for peak profit!"
+                    f"🚀🚀🚀 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚀🚀🚀\n"
+                    f"        💧 SELL HYDROGEN QUICKLY! PEAK SPIKE!\n"
+                    f"🚀🚀🚀 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚀🚀🚀\n"
+                    f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n"
+                    f"💰 **Market Value:** **${h2_price:.2f}** *(PEAK: Above > ${HYDROGEN_SELL_THRESHOLD:.2f}+)*\n"
+                    f"📈 **Market Status:** MAXIMUM PROFIT WINDOW\n"
+                    f"🏢 **Account:** `{EM_EMAIL}`\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                    f"Hydrogen has surged past $90+ on the global exchange!\n"
+                    f"👉 Open **Hydrogen Exchange** (`hydrogen-exchange.php`) and SELL stored hydrogen now for peak revenue!"
                 )
                 if send_to_ntfy(NTFY_TOPIC, msg, title, tags="rotating_light,money_with_wings,zap", priority="urgent"):
                     print(f"  [OK] Alert Sent: SELL HYDROGEN QUICKLY (${h2_price:.2f})")
@@ -244,17 +285,24 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
                 print(f"  [+] Hydrogen price normalized (${h2_price:.2f}). Resetting alert state.")
                 state["hydrogen_alerted"] = False
 
-    # 4. CO2 Condition
+    # 4. CO2 Condition (< $20.00)
     if "co2" in market:
         co2_price = market["co2"]["current"]
         if co2_price < CO2_BUY_THRESHOLD:
             if not state.get("co2_alerted", False):
                 title = f"BUY CO2 QUICKLY (${co2_price:.2f})"
                 msg = (
-                    f"🚨 **EMERGENCY ALERT: BUY CO2 QUICKLY!**\n\n"
-                    f"• Time: **{current_time_12h}**\n"
-                    f"• CO2 Quota Price: **${co2_price:.2f}** (Below target < ${CO2_BUY_THRESHOLD:.2f})!\n\n"
-                    f"👉 Open Energy Manager right now and buy CO2 quotas immediately!"
+                    f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                    f"          🍃 BUY CO2 QUOTAS QUICKLY!\n"
+                    f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                    f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n"
+                    f"💰 **Current Price:** **${co2_price:.2f}** *(Below Target < ${CO2_BUY_THRESHOLD:.2f})*\n"
+                    f"📉 **Market Status:** ROCK BOTTOM BUY WINDOW\n"
+                    f"🏢 **Account:** `{EM_EMAIL}`\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                    f"CO2 quota prices have dropped below your $20 target!\n"
+                    f"👉 Open **Energy Manager** right now and buy CO2 quotas immediately!"
                 )
                 if send_to_ntfy(NTFY_TOPIC, msg, title, tags="rotating_light,recycle,warning", priority="urgent"):
                     print(f"  [OK] Alert Sent: BUY CO2 QUICKLY (${co2_price:.2f})")
@@ -277,14 +325,16 @@ def main():
     # Load persistent state
     state = load_state()
 
-    is_briefing_requested = ("--briefing" in sys.argv) or (now.hour == 6 and now.minute >= 25 and now.minute <= 45)
-    should_send_briefing = is_briefing_requested and (state.get("last_briefing_date") != today_str or "--force" in sys.argv)
+    # Rule: Send morning briefing on the first run of each morning (after 06:00 AM IST)
+    # or whenever explicitly forced via --briefing or --force
+    is_first_morning_run = (now.hour >= 6) and (state.get("last_briefing_date") != today_str)
+    should_send_briefing = is_first_morning_run or ("--briefing" in sys.argv) or ("--force" in sys.argv)
 
     print(f"=====================================================")
-    print(f" Energy Manager Live Tracker - abhijaysinghlimited")
+    print(f" ⚡ Energy Manager Live Tracker - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     print(f" ntfy Topic   : {NTFY_TOPIC}")
-    print(f" Mode         : {'Morning Briefing + Live Check' if should_send_briefing else 'Hourly Live Check'}")
+    print(f" Mode         : {'Daily Morning Briefing + Live Check' if should_send_briefing else 'Hourly Live Check'}")
     print(f"=====================================================\n")
 
     print("[*] Logging in to energymanagergame.com...")
@@ -307,24 +357,27 @@ def main():
     print(f"     • Hydrogen : ${market.get('hydrogen', {}).get('current', 'N/A')}")
     print(f"     • CO2 Quota: ${market.get('co2', {}).get('current', 'N/A')}")
 
-    # 1. Send morning briefing ONCE per day
+    # 1. Send daily morning briefing ONCE per day
     if should_send_briefing:
         briefing_msg = build_morning_briefing(market, now)
         print("\n--- MORNING BRIEFING PREVIEW ---")
         print(briefing_msg)
         print("--------------------------------\n")
-        print(f"[*] Sending 6:30 AM briefing to ntfy.sh/{NTFY_TOPIC}...")
-        send_to_ntfy(
+        print(f"[*] Sending morning briefing to ntfy.sh/{NTFY_TOPIC}...")
+        sent = send_to_ntfy(
             topic=NTFY_TOPIC,
             message=briefing_msg,
-            title=f"Energy Manager: Morning Market Briefing ({current_time_12h})",
-            tags="factory,clipboard,zap",
+            title=f"Energy Manager: Daily Market Briefing ({current_time_12h})",
+            tags="factory,clipboard,zap,sparkles",
             priority="default"
         )
-        print("[OK] Morning Briefing sent successfully!")
-        state["last_briefing_date"] = today_str
-    elif is_briefing_requested:
-        print(f"[-] Morning briefing for today ({today_str}) was already sent. Skipping duplicate.")
+        if sent:
+            print("[OK] Morning Briefing sent successfully!")
+            state["last_briefing_date"] = today_str
+        else:
+            print("[!] Failed to send morning briefing.")
+    else:
+        print(f"[-] Morning briefing for today ({today_str}) already sent. Skipping duplicate.")
 
     # 2. Check emergency threshold conditions (Alert sent ONCE only per dip)
     print("\n[*] Checking Emergency Conditions (Alert sent ONCE per dip)...")
@@ -332,7 +385,7 @@ def main():
 
     # Save state
     save_state(state)
-    print("\n[OK] Energy Manager check completed successfully.")
+    print("\n[OK] Energy Manager check completed successfully (State saved).")
 
 
 if __name__ == "__main__":

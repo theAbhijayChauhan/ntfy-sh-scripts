@@ -2,8 +2,9 @@ name: Energy Manager Hourly Live Tracker
 
 on:
   schedule:
-    # 01:00 UTC to 18:00 UTC = 06:30 AM IST to 11:30 PM IST (Every hour starting at 6:30 AM)
-    - cron: '0 1-18 * * *'
+    # 01:18 UTC to 18:18 UTC = 06:48 AM IST to 11:48 PM IST (Hourly live checks)
+    # Minute 18 avoids standard :00 and :30 congestion delays on GitHub Actions runners
+    - cron: '18 1-18 * * *'
   workflow_dispatch:
 
 jobs:
