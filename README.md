@@ -118,9 +118,9 @@ The `ntfy.sh` server holds the message in its queue and releases it directly to 
 ### 3. ⚡ Energy Manager ([`energy-alert/`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/energy-alert/))
 * **Data Feed:** `https://energymanagergame.com` (Direct live account session).
 * **Rule:**
-  1. **Daily Market Briefing:** Sent on the first run of the morning showing the live opening prices for Oil, Coal, Hydrogen, and CO2 compared against your target thresholds.
-  2. **Hourly Live Checks:** Checks market prices every hour.
-  3. **Strict Emergency Alerts (Sent ONCE per Dip):**
+  1. **Hourly Price Radar:** Checks market prices every hour.
+  2. **Strict Silent Policy:** Zero routine messages sent if prices are outside target range.
+  3. **Emergency Alerts (Sent ONCE per Dip only when in range):**
      * 🛢️ **Oil < \$1.90** ➜ `BUY OIL QUICKLY`
      * 🪨 **Coal < \$1.50** ➜ `BUY COAL QUICKLY`
      * 💧 **Hydrogen > \$90.00+** ➜ `SELL HYDROGEN QUICKLY`
