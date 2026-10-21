@@ -5,9 +5,10 @@
 🔔 Topic: abhijaysinghlimited-train-fuel-alert
 
 ✨ Features:
-1. Morning Briefing: Beautiful emoji-rich summary of the Top 4 cheapest Fuel & Spot times.
-2. Exact-Time Alerts: Pre-scheduled via ntfy.sh to buzz phone at the 4 lowest Fuel + 4 lowest Spot times.
-3. Deduplication: Briefing & scheduler run once per day (zero spam).
+1. ENABLED Switch: Set ENABLED = False to completely disable Train alerts anytime!
+2. Morning Briefing: Tries continuously from 6:00 AM to 7:00 AM IST until sent once.
+3. Exact-Time Alerts: Pre-scheduled via ntfy.sh to buzz phone at the 4 lowest Fuel + 4 lowest Spot times.
+4. Deduplication: Briefing & scheduler run once per day (zero spam).
 """
 
 import requests
@@ -21,6 +22,11 @@ from zoneinfo import ZoneInfo
 # Ensure UTF-8 output in Windows terminal
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# ==========================================
+# MASTER TOGGLE (Set to False to turn OFF alerts)
+# ==========================================
+ENABLED = True
 
 # ==========================================
 # CONFIGURATION
@@ -74,18 +80,31 @@ def get_slot_datetime(time_str: str, now: datetime.datetime) -> datetime.datetim
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
-def fetch_train_prices(timezone_name=TIMEZONE_NAME):
-    """Fetch live 24-hour fuel & spot schedule from mgtools cloud API."""
+def fetch_train_prices(timezone_name=TIMEZONE_NAME, retries=5, delay=5):
+    """Fetch live 24-hour fuel & spot schedule from mgtools cloud API with retries."""
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
     payload = {"timezone": timezone_name}
     
-    response = requests.post(API_URL, json=payload, headers=headers, timeout=15)
-    response.raise_for_status()
-    result = response.json()
-    return result.get("data", [])
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(API_URL, json=payload, headers=headers, timeout=15)
+            response.raise_for_status()
+            result = response.json()
+            data = result.get("data", [])
+            if data:
+                return data
+        except Exception as e:
+            last_err = e
+            print(f"  [!] Fetch attempt {attempt}/{retries} failed: {e}. Retrying in {delay}s...")
+            time.sleep(delay)
+    
+    if last_err:
+        raise last_err
+    return []
 
 
 def send_to_ntfy(topic: str, message: str, title: str, tags: str = "train,fuelpump", priority: str = "default", at_timestamp: int = None):
@@ -237,6 +256,10 @@ def schedule_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime):
 
 
 def main():
+    if not ENABLED and "--force" not in sys.argv:
+        print("[i] Train alerts are currently DISABLED (ENABLED=False in script). Exiting.")
+        return
+
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
     today_str = now.strftime("%Y-%m-%d")
@@ -244,16 +267,17 @@ def main():
     
     state = load_state()
 
-    # Deduplication check: if already processed today and not forced, skip!
+    # Deduplication check: if already processed today and not forced, stop!
     if state.get("last_processed_date") == today_str and "--force" not in sys.argv:
-        print(f"[OK] Train Manager briefing & alerts for today ({today_str}) have already been scheduled.")
-        print("     Zero duplicates sent. (Use --force to override).")
+        print(f"[OK] Train Manager briefing & alerts for today ({today_str}) have ALREADY been sent.")
+        print("     Zero duplicates sent. Once sent, it stops. (Use --force to override).")
         return
 
     print(f"=====================================================")
     print(f" 🚆 Train Manager Notifier - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     print(f" ntfy Topic   : {NTFY_TOPIC}")
+    print(f" Goal         : Deliver Morning Briefing & Schedule Exact-Time Alerts")
     print(f"=====================================================\n")
 
     print("[*] Fetching schedule from mgtools.cloud...")
@@ -292,17 +316,17 @@ def main():
     )
     if sent:
         print("[OK] Daily Briefing Notification sent successfully!")
+        # Record state so it NEVER sends duplicate briefing today
+        state["last_processed_date"] = today_str
+        save_state(state)
     else:
         print("[!] Failed to send briefing notification.")
+        return
 
     # 2. Schedule exact-time alerts: 4 for Fuel + 4 for Spot
     schedule_alerts(top_4_fuel, top_4_spot, now)
 
-    # Save processed state for today
-    state["last_processed_date"] = today_str
-    save_state(state)
-
-    print("\n[OK] Train Manager Notifier completed successfully (State saved).")
+    print("\n[OK] Train Manager Notifier completed successfully (State saved). It will now stop.")
 
 
 if __name__ == "__main__":

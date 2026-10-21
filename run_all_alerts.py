@@ -8,6 +8,10 @@ import subprocess
 import sys
 import os
 
+# Ensure UTF-8 output in Windows terminal
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def run_script(rel_path, *args):

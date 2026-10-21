@@ -2,10 +2,10 @@ name: Daily Morning Briefing & 4-Chance Scheduler (Train & Truck)
 
 on:
   schedule:
-    # 00:23 UTC = 05:53 AM IST & 00:37 UTC = 06:07 AM IST
-    # Dual-schedule with off-peak minutes prevents GitHub Actions queue drops and delays
-    - cron: '23 0 * * *'
-    - cron: '37 0 * * *'
+    # Continuous 1-hour retry window from 6:00 AM to 7:00 AM IST (00:20 UTC to 01:20 UTC)
+    # Tries every 10 minutes until today's briefing is sent once, then safely stops.
+    - cron: '20,30,40,50 0 * * *'
+    - cron: '0,10,20 1 * * *'
   workflow_dispatch:
 
 jobs:

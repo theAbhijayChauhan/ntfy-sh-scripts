@@ -4,20 +4,22 @@
 🎯 Source: https://energymanagergame.com/ (Official Game Web Client)
 🔔 Topic: abhijaysinghlimited-energy-fuel-alert
 
-✨ Strict Rules:
-1. Hourly Check: Checks live prices every hour.
-2. Zero Routine Spam: ONLY sends a message if at least ONE commodity is in target range:
+✨ Features:
+1. ENABLED Switch: Set ENABLED = False to turn OFF energy alerts anytime!
+2. Morning Briefing: Tries continuously between 6:30 AM and 7:30 AM IST until sent once. Once sent, it stops.
+3. Hourly Live Radar: Checks prices every hour.
+4. Strict Emergency Thresholds (Silent unless in range):
    - 🛢️ Oil < $1.90 ➜ BUY OIL QUICKLY
    - 🪨 Coal < $1.50 ➜ BUY COAL QUICKLY
    - 💧 Hydrogen > $90.00+ ➜ SELL HYDROGEN QUICKLY
    - 🍃 CO2 Quotas < $20.00 ➜ BUY CO2 QUICKLY
    - Uranium: Ignored.
-3. If all prices are normal: COMPLETELY SILENT (Zero notifications sent).
-4. Deduplication: Alerts sent EXACTLY ONCE per price dip. Does not repeat every hour while price remains low.
+5. Deduplication: Alerts sent EXACTLY ONCE per price dip.
 """
 
 import requests
 import datetime
+import time
 import os
 import sys
 import json
@@ -26,6 +28,11 @@ from zoneinfo import ZoneInfo
 # Ensure UTF-8 output in Windows terminal
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# ==========================================
+# MASTER TOGGLE (Set to False to turn OFF alerts)
+# ==========================================
+ENABLED = True
 
 # ==========================================
 # CONFIGURATION
@@ -80,11 +87,8 @@ def save_state(state: dict):
         print(f"[!] Warning: Could not save state: {e}")
 
 
-def create_authenticated_session():
-    """Log in to energymanagergame.com with credentials."""
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
+def create_authenticated_session(retries=3, delay=5):
+    """Log in to energymanagergame.com with credentials and retries."""
     login_url = f"{BASE_URL}/weblogin/signin.php"
     login_headers = {
         "X-Requested-With": "XMLHttpRequest",
@@ -97,39 +101,46 @@ def create_authenticated_session():
         "pass": EM_PASSWORD,
         "remember": "1"
     }
-    
-    res = session.post(login_url, data=payload, headers=login_headers, timeout=15)
-    if "energymanagergame.com" in res.text or res.status_code == 200:
-        return session
-    else:
-        print(f"[!] Login failed. Response: {res.text[:200]}")
-        return None
+
+    for attempt in range(1, retries + 1):
+        try:
+            session = requests.Session()
+            session.headers.update(HEADERS)
+            res = session.post(login_url, data=payload, headers=login_headers, timeout=15)
+            if "energymanagergame.com" in res.text or res.status_code == 200:
+                return session
+            print(f"[!] Login attempt {attempt}/{retries} returned unexpected response. Retrying in {delay}s...")
+        except Exception as e:
+            print(f"[!] Login attempt {attempt}/{retries} error: {e}. Retrying in {delay}s...")
+        time.sleep(delay)
+
+    return None
 
 
-def fetch_live_commodity_prices(session):
-    """
-    Fetch live market prices:
-    - Oil, Coal, Hydrogen, CO2
-    """
+def fetch_live_commodity_prices(session, retries=3, delay=3):
+    """Fetch live market prices: Oil, Coal, Hydrogen, CO2."""
     market = {}
     targets = ["oil", "coal", "hydrogen", "co2"]
     
     for t in targets:
         url = f"{BASE_URL}/api/price.history.api.php?target={t}"
-        try:
-            r = session.get(url, timeout=10)
-            if r.status_code == 200:
-                history = r.json()
-                if isinstance(history, list) and len(history) > 0:
-                    current_price = history[-1]
-                    market[t] = {
-                        "current": current_price,
-                        "min": min(history),
-                        "max": max(history),
-                        "history": history
-                    }
-        except Exception as e:
-            print(f"[!] Error fetching {t}: {e}")
+        for attempt in range(1, retries + 1):
+            try:
+                r = session.get(url, timeout=10)
+                if r.status_code == 200:
+                    history = r.json()
+                    if isinstance(history, list) and len(history) > 0:
+                        market[t] = {
+                            "current": history[-1],
+                            "min": min(history),
+                            "max": max(history),
+                            "history": history
+                        }
+                        break
+            except Exception as e:
+                if attempt == retries:
+                    print(f"[!] Error fetching {t} after {retries} attempts: {e}")
+                time.sleep(delay)
 
     return market
 
@@ -148,9 +159,7 @@ def send_to_ntfy(topic: str, message: str, title: str, tags: str = "factory,fuel
 
 
 def build_morning_briefing(market: dict, now: datetime.datetime) -> str:
-    """
-    Optional Manual Market Briefing (Only sent if explicitly called with --briefing).
-    """
+    """Build the Morning Briefing showing opening commodity snapshot."""
     date_str = now.strftime("%A, %d %B %Y")
     current_time_12h = now.strftime("%I:%M %p")
     
@@ -184,7 +193,8 @@ def build_morning_briefing(market: dict, now: datetime.datetime) -> str:
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🚨 **STRICT RADAR ACTIVE:** Alerts only fire when a commodity enters target range!")
+    lines.append("🚨 **STRICT HOURLY RADAR ACTIVE:**")
+    lines.append("📱 You will receive an emergency buy/sell alert only when a price enters your target range!")
     return "\n".join(lines)
 
 
@@ -195,8 +205,6 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
     - Coal < $1.50
     - Hydrogen > $90.00
     - CO2 < $20.00
-    
-    Returns (state, alerts_sent_count)
     """
     alerts_sent = 0
 
@@ -324,22 +332,34 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
 
 
 def main():
+    if not ENABLED and "--force" not in sys.argv:
+        print("[i] Energy alerts are currently DISABLED (ENABLED=False in script). Exiting.")
+        return
+
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
     today_str = now.strftime("%Y-%m-%d")
     
-    # Load persistent state
     state = load_state()
 
-    # Rule: ONLY send routine briefing if explicitly called with --briefing
-    # On all normal hourly checks: ZERO routine messages. ONLY ping if commodity is in range!
-    should_send_briefing = ("--briefing" in sys.argv)
+    # Rule for Morning Briefing:
+    # Tries between 06:30 AM and 07:30 AM IST (or first run after 06:30 AM today) until sent ONCE.
+    # Once sent, state["last_briefing_date"] is saved so it STOPS sending briefings for today.
+    is_briefing_window = (now.hour == 6 and now.minute >= 30) or (now.hour == 7 and now.minute <= 35)
+    is_first_morning_run = (now.hour >= 6) and (state.get("last_briefing_date") != today_str)
+
+    should_send_briefing = (
+        ("--briefing" in sys.argv) or 
+        ("--force" in sys.argv) or 
+        (is_first_morning_run and is_briefing_window) or
+        (is_first_morning_run and state.get("last_briefing_date") != today_str)
+    )
 
     print(f"=====================================================")
     print(f" ⚡ Energy Manager Live Tracker - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     print(f" ntfy Topic   : {NTFY_TOPIC}")
-    print(f" Policy       : SILENT unless commodity is in range")
+    print(f" Mode         : {'Daily Morning Briefing + Radar Check' if should_send_briefing else 'Silent Hourly Live Radar'}")
     print(f"=====================================================\n")
 
     print("[*] Logging in to energymanagergame.com...")
@@ -367,26 +387,35 @@ def main():
     print(f"     • Hydrogen : ${h2_curr} (Target: > ${HYDROGEN_SELL_THRESHOLD:.2f}+)")
     print(f"     • CO2 Quota: ${co2_curr} (Target: < ${CO2_BUY_THRESHOLD:.2f})")
 
-    # 1. Manual Briefing (Only if --briefing was passed)
+    # 1. Send Daily Morning Briefing (ONCE per day during 6:30 - 7:30 AM window)
     if should_send_briefing:
         briefing_msg = build_morning_briefing(market, now)
-        print("\n[*] Sending manual briefing to ntfy.sh/{NTFY_TOPIC}...")
-        send_to_ntfy(
+        print("\n--- MORNING BRIEFING PREVIEW ---")
+        print(briefing_msg)
+        print("--------------------------------\n")
+        print(f"[*] Sending morning briefing to ntfy.sh/{NTFY_TOPIC}...")
+        sent = send_to_ntfy(
             topic=NTFY_TOPIC,
             message=briefing_msg,
-            title=f"Energy Manager: Market Status ({current_time_12h})",
-            tags="factory,clipboard,zap",
+            title=f"Energy Manager: Daily Market Briefing ({current_time_12h})",
+            tags="factory,clipboard,zap,sparkles",
             priority="default"
         )
-        print("[OK] Briefing sent successfully!")
-        state["last_briefing_date"] = today_str
+        if sent:
+            print("[OK] Morning Briefing sent successfully! It will now stop sending briefings for today.")
+            state["last_briefing_date"] = today_str
+            save_state(state)
+        else:
+            print("[!] Failed to send morning briefing.")
+    else:
+        print(f"[-] Morning briefing for today ({today_str}) already sent. Skipping briefing.")
 
     # 2. Check emergency threshold conditions (Alert sent ONLY if price is in range)
-    print("\n[*] Checking Emergency Conditions...")
+    print("\n[*] Checking Emergency Conditions (Strict Radar)...")
     state, alerts_sent = check_emergency_conditions(market, state, current_time_12h)
 
     if alerts_sent == 0:
-        print("[i] All commodity prices are currently outside alert range.")
+        print("[i] All commodity prices are currently outside emergency range.")
         print("[i] Policy enforced: ZERO messages sent to phone.")
     else:
         print(f"[OK] Total emergency alerts sent: {alerts_sent}")

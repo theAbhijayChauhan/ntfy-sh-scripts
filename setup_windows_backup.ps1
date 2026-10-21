@@ -20,19 +20,22 @@ if (-not $pythonPath) {
 # Create Scheduled Task Action: run pythonw (or python) with run_all_alerts.py
 $action = New-ScheduledTaskAction -Execute $pythonPath -Argument "`"$runnerScript`"" -WorkingDirectory $scriptDir
 
-# Trigger: Hourly repeat starting from 06:00 AM every day
+# Trigger: Runs daily at 06:00 AM and repeats every 15 minutes throughout the day
+# - 06:00 to 07:00 AM: Delivers Train & Truck Morning Briefing + Schedules Alerts
+# - 06:30 to 07:30 AM: Delivers Energy Manager Morning Briefing
+# - Rest of Day: Performs silent hourly price checks for Energy Manager (zero spam)
 $trigger = New-ScheduledTaskTrigger -Daily -At "06:00 AM"
-$trigger.RepetitionInterval = (New-TimeSpan -Hours 1)
+$trigger.RepetitionInterval = (New-TimeSpan -Minutes 15)
 $trigger.RepetitionDuration = (New-TimeSpan -Days 1)
 
-# Settings: Allow on demand, run in background
+# Settings: Allow start on battery, run when available
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
 try {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Automated 24/7 price alert tracker and ntfy notifier for Trophy Games (Train, Truck, Energy Manager)." | Out-Null
     Write-Host "[OK] Task '$taskName' successfully registered in Windows Task Scheduler!" -ForegroundColor Green
-    Write-Host "     It will run daily starting at 06:00 AM and repeat hourly." -ForegroundColor Green
+    Write-Host "     It will run daily starting at 06:00 AM and repeat every 15 minutes." -ForegroundColor Green
     Write-Host "     Because of built-in deduplication, it will NEVER send duplicate alerts if GitHub Actions already did." -ForegroundColor Green
 } catch {
     Write-Host "[!] Failed to register scheduled task: $_" -ForegroundColor Red

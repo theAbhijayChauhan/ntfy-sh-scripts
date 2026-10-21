@@ -2,9 +2,12 @@ name: Energy Manager Hourly Live Tracker
 
 on:
   schedule:
-    # 01:18 UTC to 18:18 UTC = 06:48 AM IST to 11:48 PM IST (Hourly live checks)
-    # Minute 18 avoids standard :00 and :30 congestion delays on GitHub Actions runners
-    - cron: '18 1-18 * * *'
+    # 1. Morning Briefing Retry Window: 06:30 AM to 07:30 AM IST (01:00 UTC to 02:00 UTC)
+    # Tries every 10 minutes until morning briefing is sent once, then safely stops.
+    - cron: '0,10,20,30,40,50 1 * * *'
+    - cron: '0 2 * * *'
+    # 2. Hourly Live Radar: Rest of the day from 07:48 AM to 11:48 PM IST (02:18 UTC to 18:18 UTC)
+    - cron: '18 2-18 * * *'
   workflow_dispatch:
 
 jobs:

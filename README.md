@@ -42,99 +42,82 @@ Phones often put idle apps to sleep. To guarantee notifications arrive without d
 
 ---
 
-## 🧠 How the System Works Under the Hood
+## 🛑 How to Stop or Pause Any Alert (e.g., Truck Alerts)
 
-### The Architecture Flow
+If you ever want to stop receiving alerts for one specific game (like Truck Manager):
 
-```
-┌──────────────────────────────────────────────┐
-│  GitHub Actions (Free Cloud Scheduler)       │
-│                                              │
-│  - 05:53 AM / 06:07 AM IST: Train & Truck    │
-│  - Every Hour (:18 min): Energy Manager      │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│  Python Notifier Scripts                     │
-│                                              │
-│  - Fetches live market feeds / game APIs     │
-│  - Converts times to 12-Hour AM/PM format    │
-│  - Finds Top 4 / Emergency Price Thresholds  │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼ (HTTP POST with 'At' unix header)
-┌──────────────────────────────────────────────┐
-│  ntfy.sh Cloud Server (Go Pub/Sub Engine)    │
-│                                              │
-│  - Delivers morning briefing instantly       │
-│  - HOLDS exact-time alerts until target time │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼ (Push notification packet)
-┌──────────────────────────────────────────────┐
-│  Google FCM (Android) / Apple APNs (iOS)     │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│  📱 Your Phone Lock Screen Rings & Vibrates! │
-└──────────────────────────────────────────────┘
-```
+### Method 1: Instant Mute from Your Phone (Easiest - 5 Seconds)
+1. Open the **ntfy** app on your phone.
+2. Tap on `abhijaysinghlimited-truck-fuel-alert`.
+3. Tap the **3 dots (Menu)** in the top right -> Tap **Unsubscribe** (or set **Mute** / disable notifications).
+4. That's it! Your phone will immediately stop ringing for truck alerts.
 
-### The Secret Weapon: The `At` Header
-Why don't you need a computer running 24/7?
-When the script runs in the morning, it detects future cheap price times (for example, fuel dropping to \$2,000 at `01:30 PM`).
-Instead of running a loop all day, Python sends the alert to `ntfy.sh` with the header:
-```http
-At: 1792483800  <-- Exact Unix timestamp for 01:30 PM
+### Method 2: Toggle `ENABLED = False` in the Script
+Every script has a master switch at the very top:
+* Open [`truck-alert/truck_fuel_notifier.py`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/truck-alert/truck_fuel_notifier.py).
+* Change line 20 from:
+  ```python
+  ENABLED = True
+  ```
+  to:
+  ```python
+  ENABLED = False
+  ```
+* Commit and push to GitHub. The script will immediately exit and send nothing.
+
+### Method 3: In GitHub Actions Workflow
+In [`.github/workflows/daily_briefing_scheduler.yml`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/.github/workflows/daily_briefing_scheduler.yml), comment out the truck step by adding `#`:
+```yaml
+# - name: Run Truck Manager Notifier (4 Diesel + 4 CO2 + 4 kWh)
+#   run: |
+#     python truck-alert/truck_fuel_notifier.py
 ```
-The `ntfy.sh` server holds the message in its queue and releases it directly to your phone at **exactly 01:30 PM**!
 
 ---
 
-## 🎮 Game Rules & Logic Breakdown
+## 🎮 Game Rules & Retry Windows Breakdown
 
 ### 1. 🚆 Train Manager ([`train-alert/`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/train-alert/))
-* **Data Feed:** `https://api.mgtools.cloud/v1/fuel-price/train`
-* **Timing:** Analyzes the full 24-hour cycle in your local time (`Asia/Kolkata`).
-* **Rule:**
-  1. **Daily Morning Briefing:** Sent once per day with the **Top 4 Lowest Fuel Times** and **Top 4 Lowest Spot Times**, styled with ranking medals (🥇, 🥈, 🥉, 4️⃣), exact prices, and badges.
-  2. **Exact-Time Alerts:** Pre-schedules alerts to buzz your phone at the exact times of the **Top 4 lowest Fuel prices** and **Top 4 lowest Spot prices**.
+* **Continuous Morning Window (06:00 AM – 07:00 AM IST):**
+  - Tries repeatedly every 10 minutes between 6:00 AM and 7:00 AM IST until today's morning briefing is sent.
+  - **Once sent, it immediately stops!** Subsequent runs see that today is already completed and safely exit in 1 second with zero duplicate messages.
+* **Exact-Time Alerts:** Pre-schedules alerts to buzz your phone at the exact times of the **Top 4 lowest Fuel prices** and **Top 4 lowest Spot prices**.
 
 ---
 
 ### 2. 🚛 Truck Manager ([`truck-alert/`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/truck-alert/))
-* **Data Feed:** `https://api.mgtools.cloud/v1/fuel-price/truck`
-* **Rule:**
-  1. **Daily Morning Briefing:** Sent once per day with the **Top 4 Lowest Diesel**, **Top 4 Lowest CO2 Quota**, and **Top 4 Lowest kWh Electricity** times.
-  2. **Exact-Time Alerts:** Pre-schedules alerts for each commodity:
-     * 4 chances for Diesel (sent at the 4 lowest Diesel times).
-     * 4 chances for CO2 (sent at the 4 lowest CO2 times).
-     * 4 chances for kWh (sent at the 4 lowest kWh electricity times).
+* **Continuous Morning Window (06:00 AM – 07:00 AM IST):**
+  - Tries repeatedly every 10 minutes between 6:00 AM and 7:00 AM IST until today's morning briefing is sent.
+  - **Once sent, it immediately stops!**
+* **Exact-Time Alerts:** Pre-schedules alerts for each commodity:
+  * 4 chances for Diesel (sent at the 4 lowest Diesel times).
+  * 4 chances for CO2 (sent at the 4 lowest CO2 times).
+  * 4 chances for kWh (sent at the 4 lowest kWh electricity times).
 
 ---
 
 ### 3. ⚡ Energy Manager ([`energy-alert/`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/energy-alert/))
-* **Data Feed:** `https://energymanagergame.com` (Direct live account session).
-* **Rule:**
-  1. **Hourly Price Radar:** Checks market prices every hour.
-  2. **Strict Silent Policy:** Zero routine messages sent if prices are outside target range.
-  3. **Emergency Alerts (Sent ONCE per Dip only when in range):**
-     * 🛢️ **Oil < \$1.90** ➜ `BUY OIL QUICKLY`
-     * 🪨 **Coal < \$1.50** ➜ `BUY COAL QUICKLY`
-     * 💧 **Hydrogen > \$90.00+** ➜ `SELL HYDROGEN QUICKLY`
-     * 🍃 **CO2 Quotas < \$20.00** ➜ `BUY CO2 QUICKLY`
+* **Continuous Morning Window (06:30 AM – 07:30 AM IST):**
+  - Tries repeatedly every 10 minutes between 6:30 AM and 7:30 AM IST until today's market briefing is sent.
+  - **Once sent, it stops sending briefings for today.**
+* **Silent Hourly Price Radar (Rest of the Day):**
+  - Checks live market prices every hour.
+  - **Strictly silent:** Zero messages sent if prices are outside range.
+* **Strict Emergency Alerts (Sent ONCE per Dip only when in range):**
+  * 🛢️ **Oil < \$1.90** ➜ `BUY OIL QUICKLY`
+  * 🪨 **Coal < \$1.50** ➜ `BUY COAL QUICKLY`
+  * 💧 **Hydrogen > \$90.00+** ➜ `SELL HYDROGEN QUICKLY`
+  * 🍃 **CO2 Quotas < \$20.00** ➜ `BUY CO2 QUICKLY`
 
 ---
 
 ## 💻 100% Fail-Safe Backup (Windows Task Scheduler)
 
-GitHub Actions runs 100% free in the cloud. However, public GitHub Actions runners can occasionally delay cron triggers during peak traffic.
+GitHub Actions runs 100% free in the cloud. However, public GitHub Actions runners can occasionally delay cron triggers during peak global traffic.
 To guarantee 100% reliability, you can install a local backup task on your Windows PC:
 
 1. Right-click [`setup_windows_backup.bat`](file:///c:/Users/abhij/OneDrive/Desktop/Ntfy%20sh/setup_windows_backup.bat) -> **Run as Administrator**.
-2. It registers a silent background task in **Windows Task Scheduler** that runs hourly.
+2. It registers a silent background task in **Windows Task Scheduler** that runs every 15 minutes.
 3. **Zero Conflicts:** Because state files record whether the briefing was already sent or alerts were scheduled, the local runner and GitHub Actions will **NEVER send duplicate messages**!
 
 ---
@@ -168,19 +151,3 @@ python energy-alert/energy_fuel_notifier.py --force
 2. **Train & Truck Daily State (`train_state.json` / `truck_state.json`):**
    * Morning briefings and exact-time alerts are scheduled **EXACTLY ONCE PER DAY**.
    * Any duplicate executions on the same day detect the existing schedule and safely exit with zero duplicate messages.
-
----
-
-## 🛠️ Maintenance & FAQ
-
-#### Q: How do I change an alert threshold in the future?
-Open `energy-alert/energy_fuel_notifier.py` and edit the constants near the top of the file:
-```python
-OIL_BUY_THRESHOLD = 1.90        # Alert when Oil < $1.90
-COAL_BUY_THRESHOLD = 1.50       # Alert when Coal < $1.50
-HYDROGEN_SELL_THRESHOLD = 90.00 # Alert when Hydrogen > $90.00+
-CO2_BUY_THRESHOLD = 20.00       # Alert when CO2 Quota < $20.00
-```
-
-#### Q: What if my Energy Manager password changes?
-Simply update `EM_PASSWORD` in `energy-alert/energy_fuel_notifier.py`, or set the `EM_PASSWORD` secret in your GitHub repository settings under **Settings -> Secrets and variables -> Actions**.

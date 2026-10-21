@@ -5,9 +5,10 @@
 🔔 Topic: abhijaysinghlimited-truck-fuel-alert
 
 ✨ Features:
-1. Morning Briefing: Beautiful emoji layout showing the Top 4 cheapest Diesel, CO2, and kWh electricity times.
-2. Exact-Time Alerts: Pre-scheduled via ntfy.sh to buzz phone at the 4 lowest Diesel + 4 lowest CO2 + 4 lowest kWh times.
-3. Deduplication: Briefing & scheduler run once per day (zero spam).
+1. ENABLED Switch: Set ENABLED = False to completely disable Truck alerts anytime!
+2. Morning Briefing: Tries continuously from 6:00 AM to 7:00 AM IST until sent once.
+3. Exact-Time Alerts: Pre-scheduled via ntfy.sh to buzz phone at the 4 lowest Diesel + 4 lowest CO2 + 4 lowest kWh times.
+4. Deduplication: Briefing & scheduler run once per day (zero spam).
 """
 
 import requests
@@ -21,6 +22,11 @@ from zoneinfo import ZoneInfo
 # Ensure UTF-8 output in Windows terminal
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# ==========================================
+# MASTER TOGGLE (Set to False to turn OFF alerts)
+# ==========================================
+ENABLED = True
 
 # ==========================================
 # CONFIGURATION
@@ -74,18 +80,31 @@ def get_slot_datetime(time_str: str, now: datetime.datetime) -> datetime.datetim
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
-def fetch_truck_prices(timezone_name=TIMEZONE_NAME):
-    """Fetch live 24-hour diesel, kwh, and CO2 schedule from mgtools cloud API."""
+def fetch_truck_prices(timezone_name=TIMEZONE_NAME, retries=5, delay=5):
+    """Fetch live 24-hour diesel, kwh, and CO2 schedule from mgtools cloud API with retries."""
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
     payload = {"timezone": timezone_name}
     
-    response = requests.post(API_URL, json=payload, headers=headers, timeout=15)
-    response.raise_for_status()
-    result = response.json()
-    return result.get("data", [])
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(API_URL, json=payload, headers=headers, timeout=15)
+            response.raise_for_status()
+            result = response.json()
+            data = result.get("data", [])
+            if data:
+                return data
+        except Exception as e:
+            last_err = e
+            print(f"  [!] Fetch attempt {attempt}/{retries} failed: {e}. Retrying in {delay}s...")
+            time.sleep(delay)
+            
+    if last_err:
+        raise last_err
+    return []
 
 
 def send_to_ntfy(topic: str, message: str, title: str, tags: str = "truck,fuelpump", priority: str = "default", at_timestamp: int = None):
@@ -278,6 +297,10 @@ def schedule_alerts(top_4_diesel: list, top_4_co2: list, top_4_kwh: list, now: d
 
 
 def main():
+    if not ENABLED and "--force" not in sys.argv:
+        print("[i] Truck alerts are currently DISABLED (ENABLED=False in script). Exiting.")
+        return
+
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
     today_str = now.strftime("%Y-%m-%d")
@@ -285,16 +308,17 @@ def main():
     
     state = load_state()
 
-    # Deduplication check: if already processed today and not forced, skip!
+    # Deduplication check: if already processed today and not forced, stop!
     if state.get("last_processed_date") == today_str and "--force" not in sys.argv:
-        print(f"[OK] Truck Manager briefing & alerts for today ({today_str}) have already been scheduled.")
-        print("     Zero duplicates sent. (Use --force to override).")
+        print(f"[OK] Truck Manager briefing & alerts for today ({today_str}) have ALREADY been sent.")
+        print("     Zero duplicates sent. Once sent, it stops. (Use --force to override).")
         return
 
     print(f"=====================================================")
     print(f" 🚛 Truck Manager Notifier - abhijaysinghlimited")
     print(f" Current Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     print(f" ntfy Topic   : {NTFY_TOPIC}")
+    print(f" Goal         : Deliver Morning Briefing & Schedule Exact-Time Alerts")
     print(f"=====================================================\n")
 
     print("[*] Fetching schedule from mgtools.cloud...")
@@ -334,17 +358,17 @@ def main():
     )
     if sent:
         print("[OK] Daily Briefing Notification sent successfully!")
+        # Record state so it NEVER sends duplicate briefing today
+        state["last_processed_date"] = today_str
+        save_state(state)
     else:
         print("[!] Failed to send briefing notification.")
+        return
 
     # 2. Schedule exact-time alerts: 4 for Diesel + 4 for CO2 + 4 for kWh
     schedule_alerts(top_4_diesel, top_4_co2, top_4_kwh, now)
 
-    # Save processed state for today
-    state["last_processed_date"] = today_str
-    save_state(state)
-
-    print("\n[OK] Truck Manager Notifier completed successfully (State saved).")
+    print("\n[OK] Truck Manager Notifier completed successfully (State saved). It will now stop.")
 
 
 if __name__ == "__main__":
