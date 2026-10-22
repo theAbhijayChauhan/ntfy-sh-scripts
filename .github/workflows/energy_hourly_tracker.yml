@@ -2,17 +2,34 @@ name: Energy Manager Hourly Live Tracker
 
 on:
   schedule:
-    # 1. Morning Briefing Retry Window: 06:30 AM to 07:30 AM IST (01:00 UTC to 02:00 UTC)
-    # Tries every 10 minutes until morning briefing is sent once, then safely stops.
+    # 1. Morning Briefing Retry Window: 06:30 AM to 07:30 AM IST
+    #    = 01:00 UTC to 02:00 UTC (IST = UTC + 5:30)
+    #    Tries every 10 minutes until the morning briefing is sent once,
+    #    then the script's state dedup skips subsequent runs for the day.
     - cron: '0,10,20,30,40,50 1 * * *'
     - cron: '0 2 * * *'
-    # 2. Hourly Live Radar: Rest of the day from 07:48 AM to 11:48 PM IST (02:18 UTC to 18:18 UTC)
+    # 2. Hourly Live Radar: 07:48 AM to 11:48 PM IST
+    #    = 02:18 UTC to 18:18 UTC
+    #    Runs at minute :18 of each hour to avoid the GitHub-cron top-of-hour
+    #    congestion that can delay scheduled runs.
     - cron: '18 2-18 * * *'
   workflow_dispatch:
+
+# Least-privilege token — this job only checks out code and runs Python.
+permissions:
+  contents: read
+
+# Prevent two concurrent runs from racing on the same cache state.
+# cancel-in-progress: false ensures an in-flight run finishes cleanly
+# rather than being killed mid-state-write.
+concurrency:
+  group: energy-tracker
+  cancel-in-progress: false
 
 jobs:
   run-energy-tracker:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -20,8 +37,10 @@ jobs:
       - name: Restore energy alert state cache
         uses: actions/cache@v4
         with:
-          path: |
-            energy-alert/energy_state.json
+          path: energy-alert/energy_state.json
+          # Always-unique key → cache is always re-saved at end of job
+          # with the latest state. restore-keys prefix-match recovers
+          # the most recent previously-saved state.
           key: energy-state-${{ github.run_id }}
           restore-keys: |
             energy-state-
@@ -31,11 +50,14 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+          # Invalidation key includes the actual requirements file
+          # so the pip cache bumps when dependencies change.
+          cache-dependency-path: energy-alert/requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r energy-alert/requirements.txt
 
       - name: Run Energy Manager Live Tracker
         env:

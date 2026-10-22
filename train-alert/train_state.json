@@ -1,3 +1,7 @@
 {
-  "last_processed_date": "2026-10-21"
+  "last_processed_date": "2026-10-22",
+  "last_run_status": "ok",
+  "last_scheduled_fuel": 1,
+  "last_scheduled_spot": 0,
+  "last_skipped_past": 7
 }
