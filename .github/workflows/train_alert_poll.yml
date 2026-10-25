@@ -37,12 +37,14 @@ jobs:
       - name: Restore scheduled-alerts state cache
         uses: actions/cache@v4
         with:
-          path: train-alert/scheduled_alerts.json
+          path: |
+            train-alert/train_state.json
+            train-alert/scheduled_alerts.json
           # Always-unique key → always re-saved with latest state at end of job.
           # restore-keys prefix-match recovers the most recent previously-saved state.
-          key: train-scheduled-state-${{ github.run_id }}
+          key: train-state-${{ github.run_id }}
           restore-keys: |
-            train-scheduled-state-
+            train-state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
