@@ -1,0 +1,62 @@
+name: Train Alert Poll-and-Fire
+
+on:
+  schedule:
+    # Every 5 minutes, 24/7. The polling script exits cleanly if there's
+    # no scheduled_alerts.json (e.g., morning briefing hasn't run yet) or
+    # if the state file is from a different day, so this is safe to run
+    # all the time. Cost: ~288 runs/day × ~30s = 144 min/day ≈ 4320 min/month.
+    #
+    # IMPORTANT: GitHub Actions free tier = 2000 min/month for PRIVATE
+    # repos, UNLIMITED for PUBLIC repos. If your repo is private and you
+    # don't want to be billed:
+    #   1. Make the repo public (recommended — your scripts have no
+    #      secrets in code, only GitHub Secrets which aren't exposed), OR
+    #   2. Switch the cron below to '*/30 * * * *' (every 30 min) —
+    #      acceptable since fuel prices change hourly, not per-minute.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Prevent two concurrent poll runs from racing on the cache state
+# (one waits for the other to finish, then runs).
+concurrency:
+  group: train-poll
+  cancel-in-progress: false
+
+jobs:
+  poll-fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore scheduled-alerts state cache
+        uses: actions/cache@v4
+        with:
+          path: train-alert/scheduled_alerts.json
+          # Always-unique key → always re-saved with latest state at end of job.
+          # restore-keys prefix-match recovers the most recent previously-saved state.
+          key: train-scheduled-state-${{ github.run_id }}
+          restore-keys: |
+            train-scheduled-state-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: train-alert/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r train-alert/requirements.txt
+
+      - name: Poll and fire due alerts
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python train-alert/poll_fire.py

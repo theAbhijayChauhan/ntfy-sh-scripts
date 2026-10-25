@@ -1,4 +1,4 @@
-name: Daily Morning Briefing & 4-Chance Scheduler (Train & Truck)
+name: Train Manager Daily Briefing & Scheduler
 
 on:
   schedule:
@@ -6,10 +6,6 @@ on:
     # = 00:30 UTC to 01:30 UTC (IST = UTC + 5:30)
     # Tries every 10 minutes until today's briefing is sent once,
     # then the script's state dedup skips subsequent runs for the day.
-    #
-    # NOTE: previous version used 00:20-01:20 UTC = 05:50-06:50 IST,
-    # which is 10 minutes early AND falls outside the briefing window
-    # check inside the Python script — so the briefing was never sent.
     - cron: '30,40,50 0 * * *'   # 00:30, 00:40, 00:50 UTC = 06:00, 06:10, 06:20 IST
     - cron: '0,10,20,30 1 * * *' # 01:00, 01:10, 01:20, 01:30 UTC = 06:30, 06:40, 06:50, 07:00 IST
   workflow_dispatch:
@@ -17,50 +13,42 @@ on:
 permissions:
   contents: read
 
+# Prevent two concurrent runs from racing on the cache state.
 concurrency:
-  group: daily-scheduler
+  group: train-daily-scheduler
   cancel-in-progress: false
 
 jobs:
-  run-daily-schedulers:
+  run-train-notifier:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Restore daily state cache
+      - name: Restore train state cache
         uses: actions/cache@v4
         with:
           path: |
             train-alert/train_state.json
-            truck-alert/truck_state.json
-          key: daily-sched-state-${{ github.run_id }}
+            train-alert/scheduled_alerts.json
+          key: train-state-${{ github.run_id }}
           restore-keys: |
-            daily-sched-state-
+            train-state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-          # Hash both requirements files so the cache key bumps on either.
-          cache-dependency-path: |
-            train-alert/requirements.txt
-            truck-alert/requirements.txt
+          cache-dependency-path: train-alert/requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r train-alert/requirements.txt
-          pip install -r truck-alert/requirements.txt
 
-      - name: Run Train Manager Notifier (4 Fuel + 4 Spot)
-        # if: always() lets truck run even if train fails, so a train
-        # script bug doesn't block truck alerts for the whole day.
-        if: always()
+      - name: Run Train Manager Notifier (sends briefing + writes scheduled_alerts.json)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python train-alert/train_fuel_notifier.py
-
-      - name: Run Truck Manager Notifier (4 Diesel + 4 CO2 + 4 kWh)
-        if: always()
-        run: python truck-alert/truck_fuel_notifier.py
