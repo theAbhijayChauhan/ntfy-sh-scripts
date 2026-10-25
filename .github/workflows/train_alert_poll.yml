@@ -14,7 +14,9 @@ on:
     #      secrets in code, only GitHub Secrets which aren't exposed), OR
     #   2. Switch the cron below to '*/30 * * * *' (every 30 min) —
     #      acceptable since fuel prices change hourly, not per-minute.
-    - cron: '*/5 * * * *'
+    # Runs at :02 and :32 past every hour (2 minutes after each 30-min price window begins).
+    # Avoids GitHub Actions top-of-hour congestion and the 5-minute cron rate limit.
+    - cron: '2,32 * * * *'
   workflow_dispatch:
 
 permissions:

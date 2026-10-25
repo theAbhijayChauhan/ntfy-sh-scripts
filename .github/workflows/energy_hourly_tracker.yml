@@ -6,9 +6,10 @@ on:
     #    = 01:00 UTC to 02:00 UTC (IST = UTC + 5:30)
     - cron: '0,10,20,30,40,50 1 * * *'
     - cron: '0 2 * * *'
-    # 2. Hourly Live Radar: 07:48 AM to 11:48 PM IST
-    #    = 02:18 UTC to 18:18 UTC
-    - cron: '18 2-18 * * *'
+    # 2. Live Radar: checks every 20 minutes (at :08, :28, :48) from 07:38 AM to 11:48 PM IST
+    #    = 02:08 UTC to 18:48 UTC.
+    #    Runs 3x/hour at off-peak minutes to catch rapid price spikes (like Hydrogen > $99).
+    - cron: '8,28,48 2-18 * * *'
   workflow_dispatch:
 
 permissions:
