@@ -1,31 +1,34 @@
 """
 ============================================================
- 🚆 Train Manager - Daily Fuel & Spot Price Tracker + Scheduler
+ 🚆 Train Manager - Daily Fuel & Spot Price Tracker
  🏢 Company: abhijaysinghlimited
  🎯 Source: https://mgtools.cloud/games/train
  🎯 API:    https://api.mgtools.cloud/v1/fuel-price/train
- 🔔 ntfy Topic: abhijaysinghlimited-train-fuel-alert
+ 🔔 Discord Webhook (via discord_notifier.py)
 ============================================================
 
-✨ Features
-1. ENABLED switch — set ENABLED = False to mute everything.
-2. Daily run (one shot): fetch the 24-hour schedule, pick the 4 lowest Fuel
-   and 4 lowest Spot price slots, send a morning briefing, and schedule 8
-   exact-time push notifications via ntfy.sh's `At` header so the alert
-   buzzes your phone at the minute the price is lowest.
-3. Strict dedup — once today's run completes successfully, it never re-runs
-   the same day (state file). Use `--force` to override.
-4. Self-test mode — `--test-notify` sends a test push to verify ntfy.sh.
-5. Diagnostic mode — `--debug` writes full HTTP bodies to the log file.
-6. Graceful failures — if the API is unreachable or returns junk, you get
-   a `FAILURE` push notification instead of a silent crash.
+Architecture
+------------
+This script is run ONCE per day (cron 06:00–07:00 IST, retries
+every 10 min until success). It does three things:
+
+  1. Fetch today's 24-slot fuel/spot schedule from mgtools API.
+  2. Send a morning briefing to Discord (immediate webhook)
+     listing the top-4 cheapest fuel + top-4 cheapest spot times.
+  3. Write scheduled_alerts.json with the 8 future-time alerts.
+
+A SEPARATE workflow (`train_alert_poll.yml`) polls every 5 min,
+loads scheduled_alerts.json, and fires a Discord webhook at the
+exact scheduled minute of each cheapest-price slot. This is the
+"Option B: poll-and-fire" pattern — fully free on GitHub Actions,
+no bot account, no scheduled-delivery server needed.
 
 Usage
 -----
-  python train_fuel_notifier.py                # normal daily run
-  python train_fuel_notifier.py --force        # re-run even if already done today
-  python train_fuel_notifier.py --test-notify  # send a test push to ntfy
-  python train_fuel_notifier.py --debug        # verbose logging
+  python train_fuel_notifier.py                 # normal daily run
+  python train_fuel_notifier.py --force         # re-run even if done today
+  python train_fuel_notifier.py --debug         # verbose logging
+  python train_fuel_notifier.py --test-notify   # test Discord webhook
 ============================================================
 """
 
@@ -42,6 +45,16 @@ from typing import Any, Optional
 import requests
 from zoneinfo import ZoneInfo
 
+# Add the script's own dir to path so we can import discord_notifier
+# (whether it lives in this folder or one level up at repo root).
+HERE = os.path.dirname(os.path.abspath(__file__))
+PARENT = os.path.dirname(HERE)
+for p in (HERE, PARENT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from discord_notifier import send_to_discord  # noqa: E402
+
 # Force UTF-8 stdout (Windows terminals choke on emoji otherwise).
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -54,12 +67,12 @@ ENABLED = True
 # ============================================================
 #  CONFIGURATION
 # ============================================================
-NTFY_TOPIC = "abhijaysinghlimited-train-fuel-alert"
+NTFY_TOPIC = "abhijaysinghlimited-train-fuel-alert"  # kept for backward-compat
 TIMEZONE_NAME = "Asia/Kolkata"
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "train_state.json")
+SCHEDULED_ALERTS_FILE = os.path.join(HERE, "scheduled_alerts.json")
 LOG_FILE = os.path.join(HERE, "train_notifier.log")
 
 API_URL = "https://api.mgtools.cloud/v1/fuel-price/train"
@@ -71,10 +84,9 @@ API_HEADERS = {
     ),
 }
 
-# Briefing window (24h IST). The morning briefing is only sent inside this
-# window. Outside the window, the script still schedules alerts for any
-# remaining future slots, but skips the briefing. Use --force or --briefing
-# to bypass.
+# Briefing window (24h IST). The morning briefing is sent inside
+# this window. Outside the window, only scheduling runs. --force
+# or --briefing bypass.
 BRIEFING_START = (6, 0)   # 06:00
 BRIEFING_END = (7, 0)     # 07:00
 
@@ -98,7 +110,7 @@ log = logging.getLogger("train")
 # ============================================================
 DEFAULT_STATE: dict[str, Any] = {
     "last_processed_date": None,
-    "last_run_status": None,            # "ok" | "partial" | "failed"
+    "last_run_status": None,
     "last_scheduled_fuel": 0,
     "last_scheduled_spot": 0,
     "last_skipped_past": 0,
@@ -128,6 +140,78 @@ def save_state(state: dict) -> None:
 
 
 # ============================================================
+#  SCHEDULED-ALERTS FILE (for the poll-and-fire workflow)
+# ============================================================
+def write_scheduled_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime) -> None:
+    """Write the 8 future-time alerts to scheduled_alerts.json.
+
+    The poll-and-fire workflow reads this file every 5 minutes and
+    fires a Discord webhook when now >= scheduled_ts for any unfired
+    alert. We mark alerts whose time has already passed as `fired=True`
+    so the poller skips them.
+    """
+    today_str = now.strftime("%Y-%m-%d")
+    now_ts = int(now.timestamp())
+
+    alerts: list[dict] = []
+
+    medals = ["🥇 #1 Lowest Today!", "🥈 #2 Lowest Today!", "🥉 #3 Lowest Today!", "4️⃣ #4 Lowest Today!"]
+    for rank, item in enumerate(top_4_fuel, 1):
+        slot_dt = get_slot_datetime(item["time"], now)
+        if slot_dt is None:
+            continue
+        slot_ts = int(slot_dt.timestamp())
+        alerts.append({
+            "id": f"fuel-{rank}",
+            "type": "fuel",
+            "rank": rank,
+            "time_24h": clean_time(item["time"]),
+            "time_12h": to_12h(item["time"]),
+            "scheduled_ts": slot_ts,
+            "price": item["fuel"],
+            "other_price": item["spot"],
+            "medal": medals[rank - 1] if rank <= len(medals) else f"#{rank}",
+            "fired": slot_ts <= now_ts,  # auto-mark past slots as fired
+            "fired_ts": slot_ts if slot_ts <= now_ts else None,
+        })
+
+    for rank, item in enumerate(top_4_spot, 1):
+        slot_dt = get_slot_datetime(item["time"], now)
+        if slot_dt is None:
+            continue
+        slot_ts = int(slot_dt.timestamp())
+        alerts.append({
+            "id": f"spot-{rank}",
+            "type": "spot",
+            "rank": rank,
+            "time_24h": clean_time(item["time"]),
+            "time_12h": to_12h(item["time"]),
+            "scheduled_ts": slot_ts,
+            "price": item["spot"],
+            "other_price": item["fuel"],
+            "medal": medals[rank - 1] if rank <= len(medals) else f"#{rank}",
+            "fired": slot_ts <= now_ts,
+            "fired_ts": slot_ts if slot_ts <= now_ts else None,
+        })
+
+    state = {
+        "date": today_str,
+        "generated_at": now_ts,
+        "alert_count": len(alerts),
+        "alerts": alerts,
+    }
+
+    tmp = SCHEDULED_ALERTS_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, SCHEDULED_ALERTS_FILE)
+        log.info(f"Wrote {len(alerts)} scheduled alerts to {SCHEDULED_ALERTS_FILE}")
+    except Exception as e:
+        log.error(f"Could not write scheduled alerts: {e}")
+
+
+# ============================================================
 #  TIME HELPERS
 # ============================================================
 def in_briefing_window(now: datetime.datetime) -> bool:
@@ -138,15 +222,12 @@ def in_briefing_window(now: datetime.datetime) -> bool:
 
 
 def clean_time(time_str: str) -> str:
-    """Strip the '->' prefix that marks the current slot."""
     return (time_str or "").replace("->", "").strip()
 
 
 def to_12h(time_str: str) -> str:
-    """Convert 'HH:MM' (optionally '-> HH:MM') to 12-hour 'hh:mm AM/PM'."""
     is_current = "->" in (time_str or "")
     cleaned = clean_time(time_str)
-    # Be tolerant of "21:30:00" and "21:30:00.000" too.
     if ":" in cleaned:
         parts = cleaned.split(":")
         hh = parts[0].zfill(2)
@@ -162,7 +243,6 @@ def to_12h(time_str: str) -> str:
 
 
 def get_slot_datetime(time_str: str, now: datetime.datetime) -> Optional[datetime.datetime]:
-    """Timezone-aware datetime for a HH:MM slot today; None on parse failure."""
     cleaned = clean_time(time_str)
     if ":" not in cleaned:
         return None
@@ -175,11 +255,9 @@ def get_slot_datetime(time_str: str, now: datetime.datetime) -> Optional[datetim
 
 
 def _to_number(v: Any) -> Optional[float]:
-    """Coerce to float; return None if impossible."""
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return float(v)
     if isinstance(v, str):
-        # Strip "$", commas, whitespace.
         cleaned = v.replace("$", "").replace(",", "").strip()
         try:
             return float(cleaned)
@@ -189,7 +267,6 @@ def _to_number(v: Any) -> Optional[float]:
 
 
 def _fmt_money(v: Any) -> str:
-    """Format a number with thousands separator; gracefully handle non-numbers."""
     n = _to_number(v)
     if n is None:
         return "N/A"
@@ -200,7 +277,6 @@ def _fmt_money(v: Any) -> str:
 #  API
 # ============================================================
 def fetch_train_prices(timezone_name: str = TIMEZONE_NAME, retries: int = 5, delay: int = 5) -> list:
-    """Fetch the 24-hour fuel & spot schedule with retries."""
     payload = {"timezone": timezone_name}
     last_err: Optional[Exception] = None
 
@@ -214,7 +290,6 @@ def fetch_train_prices(timezone_name: str = TIMEZONE_NAME, retries: int = 5, del
             response.raise_for_status()
             result = response.json()
 
-            # Be tolerant about response shape: {data: [...]} vs just [...]
             if isinstance(result, list):
                 data = result
             elif isinstance(result, dict):
@@ -239,7 +314,6 @@ def fetch_train_prices(timezone_name: str = TIMEZONE_NAME, retries: int = 5, del
 
 
 def normalize_slots(raw_slots: list) -> list[dict]:
-    """Defensive normalization: ensure every slot has numeric `fuel`, `spot`, `time`, `day`."""
     out: list[dict] = []
     for raw in raw_slots:
         if not isinstance(raw, dict):
@@ -261,57 +335,18 @@ def normalize_slots(raw_slots: list) -> list[dict]:
 
 
 # ============================================================
-#  NOTIFICATIONS
+#  DISCORD HELPERS
 # ============================================================
-def send_to_ntfy(
-    topic: str,
-    message: str,
-    title: str,
-    tags: str = "train,fuelpump",
-    priority: str = "default",
-    at_timestamp: Optional[int] = None,
-) -> bool:
-    """Send (or schedule) a push notification via ntfy.sh.
-
-    If `at_timestamp` (Unix epoch seconds) is in the future, ntfy.sh will
-    hold the message server-side until that exact moment.
-    """
-    url = f"https://ntfy.sh/{topic}"
-    headers = {
-        "Title": title,
-        "Priority": priority,
-        "Tags": tags,
-        "Markdown": "yes",
-    }
-    if at_timestamp:
-        headers["At"] = str(at_timestamp)
-
-    try:
-        response = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=15)
-        if response.status_code == 200:
-            label = f" (scheduled for {datetime.datetime.fromtimestamp(at_timestamp, LOCAL_TZ).strftime('%I:%M %p')})" if at_timestamp else ""
-            log.info(f"ntfy OK → {title}{label}")
-            return True
-        log.error(f"ntfy FAIL: HTTP {response.status_code}: {response.text[:200]}")
-        return False
-    except requests.RequestException as e:
-        log.error(f"ntfy network error: {e}")
-        return False
-
-
 def send_test_notification() -> bool:
-    log.info(f"Sending TEST notification to ntfy.sh/{NTFY_TOPIC} ...")
-    return send_to_ntfy(
-        NTFY_TOPIC,
-        (
-            "✅ **Test notification from Train Manager notifier.**\n\n"
-            "If you see this on your phone, your ntfy topic is configured "
-            "correctly and the script can reach ntfy.sh.\n\n"
-            "Subscribe to this topic in the ntfy mobile app:\n"
-            f"`{NTFY_TOPIC}`"
+    log.info("Sending TEST notification to Discord webhook...")
+    return send_to_discord(
+        message=(
+            "✅ **Test from Train Manager notifier.**\n\n"
+            "If you see this in Discord, your webhook + script work.\n\n"
+            "Scheduled price-time alerts will appear in RED when their "
+            "minute arrives (handled by the poll-and-fire workflow)."
         ),
         title="Train Manager: TEST",
-        tags="white_check_mark,test_tube,train",
         priority="default",
     )
 
@@ -357,111 +392,10 @@ def build_morning_briefing(top_4_fuel: list, top_4_spot: list, now: datetime.dat
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🔔 **AUTO-ALERTS SCHEDULED:**")
-    lines.append("📱 You'll receive **4 Fuel + 4 Spot** live push alerts at the exact minutes above!")
-    lines.append("🎮 *Open Train Manager when the alert buzzes to maximize profit!*")
+    lines.append("🔔 **AUTO-ALERTS QUEUED:**")
+    lines.append("📱 The poll-and-fire workflow will buzz this channel at the exact minute of each cheapest slot above!")
+    lines.append("🎮 *Open Train Manager when the red alert lands!*")
     return "\n".join(lines)
-
-
-# ============================================================
-#  ALERT SCHEDULER
-# ============================================================
-def schedule_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime) -> tuple[int, int, int]:
-    """Schedule exact-time pushes via ntfy.sh `At` header.
-
-    Returns (fuel_scheduled, spot_scheduled, skipped_past) so the caller can
-    report partial failures.
-    """
-    now_ts = int(now.timestamp())
-    medals = ["🥇 #1 Lowest Today!", "🥈 #2 Lowest Today!", "🥉 #3 Lowest Today!", "4️⃣ #4 Lowest Today!"]
-    fuel_scheduled = 0
-    spot_scheduled = 0
-    skipped_past = 0
-
-    def _medal(rank: int) -> str:
-        return medals[rank - 1] if 1 <= rank <= len(medals) else f"#{rank} Rank"
-
-    log.info("Scheduling alerts for Top 4 lowest Fuel drops...")
-    for rank, item in enumerate(top_4_fuel, 1):
-        slot_dt = get_slot_datetime(item["time"], now)
-        if slot_dt is None:
-            log.warning(f"Fuel #{rank}: couldn't parse time {item['time']!r}. Skipping.")
-            skipped_past += 1
-            continue
-        slot_ts = int(slot_dt.timestamp())
-        time_12h = to_12h(item["time"])
-
-        if slot_ts <= now_ts:
-            log.info(f"Fuel #{rank}: slot {time_12h} already passed today. Skipping.")
-            skipped_past += 1
-            continue
-
-        medal_label = _medal(rank)
-        alert_msg = (
-            f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-            f"       ⛔ BUY FUEL QUICKLY • CHEAPEST NOW!\n"
-            f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-            f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
-            f"💰 **Fuel Price:** **{_fmt_money(item['fuel'])}** ({medal_label})\n"
-            f"⚡ **Spot Price:** {_fmt_money(item['spot'])}\n"
-            f"🏢 **Company:** abhijaysinghlimited\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-            f"Fuel price has hit its rock-bottom window!\n"
-            f"👉 Open **Train Manager** right now and stock up your train tanks!"
-        )
-        title = f"BUY FUEL QUICKLY: {_fmt_money(item['fuel'])} at {time_12h}"
-        if send_to_ntfy(
-            topic=NTFY_TOPIC,
-            message=alert_msg,
-            title=title,
-            tags="fuelpump,rotating_light,money_with_wings",
-            priority="urgent",
-            at_timestamp=slot_ts,
-        ):
-            fuel_scheduled += 1
-
-    log.info("Scheduling alerts for Top 4 lowest Spot drops...")
-    for rank, item in enumerate(top_4_spot, 1):
-        slot_dt = get_slot_datetime(item["time"], now)
-        if slot_dt is None:
-            log.warning(f"Spot #{rank}: couldn't parse time {item['time']!r}. Skipping.")
-            skipped_past += 1
-            continue
-        slot_ts = int(slot_dt.timestamp())
-        time_12h = to_12h(item["time"])
-
-        if slot_ts <= now_ts:
-            log.info(f"Spot #{rank}: slot {time_12h} already passed today. Skipping.")
-            skipped_past += 1
-            continue
-
-        medal_label = _medal(rank)
-        alert_msg = (
-            f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-            f"       ⚡ BUY SPOT POWER QUICKLY!\n"
-            f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-            f"⏰ **Exact Time:** {time_12h} [RIGHT NOW]\n"
-            f"⚡ **Spot Price:** **{_fmt_money(item['spot'])}** ({medal_label})\n"
-            f"⛽ **Fuel Price:** {_fmt_money(item['fuel'])}\n"
-            f"🏢 **Company:** abhijaysinghlimited\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-            f"Spot electricity is at its cheapest rate today!\n"
-            f"👉 Open **Train Manager** right now and buy spot power!"
-        )
-        title = f"BUY SPOT QUICKLY: {_fmt_money(item['spot'])} at {time_12h}"
-        if send_to_ntfy(
-            topic=NTFY_TOPIC,
-            message=alert_msg,
-            title=title,
-            tags="zap,rotating_light,chart_with_downwards_trend",
-            priority="urgent",
-            at_timestamp=slot_ts,
-        ):
-            spot_scheduled += 1
-
-    return fuel_scheduled, spot_scheduled, skipped_past
 
 
 # ============================================================
@@ -487,12 +421,10 @@ def main() -> int:
     # --- Deduplication check ---
     if state.get("last_processed_date") == today_str and "--force" not in sys.argv:
         log.info(
-            f"Train Manager for today ({today_str}) already processed. "
-            f"Skipping. (Use --force to override.)"
+            f"Train Manager for today ({today_str}) already processed. Skipping. (Use --force.)"
         )
         return 0
 
-    # Decide whether to send the morning briefing (strict window) or just schedule.
     send_briefing = (
         "--force" in sys.argv
         or "--briefing" in sys.argv
@@ -502,8 +434,7 @@ def main() -> int:
     log.info("=" * 60)
     log.info(" 🚆 Train Manager Notifier - abhijaysinghlimited")
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
-    log.info(f" Topic: {NTFY_TOPIC}")
-    log.info(f" Mode : {'Briefing + Scheduler' if send_briefing else 'Scheduler only (outside briefing window)'}")
+    log.info(f" Mode : {'Briefing + Scheduler' if send_briefing else 'Scheduler only'}")
     log.info("=" * 60)
 
     # --- Fetch schedule ---
@@ -512,19 +443,17 @@ def main() -> int:
         raw_slots = fetch_train_prices(TIMEZONE_NAME)
     except Exception as e:
         log.error(f"Failed to fetch schedule: {e}")
-        send_to_ntfy(
-            NTFY_TOPIC,
-            (
+        send_to_discord(
+            message=(
                 "⚠️ Train Manager notifier could NOT fetch the daily schedule.\n\n"
                 f"Error: `{e!s}`\n\n"
                 "Likely causes:\n"
                 "• mgtools.cloud API is down or under maintenance\n"
-                "• Network / DNS problem on this host\n"
+                "• Network / DNS problem\n"
                 "• API response shape changed (run with --debug)\n\n"
                 "No alerts were scheduled for today."
             ),
             title="Train Manager: API FETCH FAILED",
-            tags="warning,cloud,rain",
             priority="high",
         )
         return 3
@@ -532,26 +461,24 @@ def main() -> int:
     log.info(f"Fetched {len(raw_slots)} raw slots.")
     if not raw_slots:
         log.error("API returned zero slots. Notifying & exiting.")
-        send_to_ntfy(
-            NTFY_TOPIC,
-            "⚠️ Train Manager API returned an empty schedule for today.\n"
-            "Either mgtools.cloud is broken or the API contract changed.\n"
-            "Run with --debug and inspect train_notifier.log.",
+        send_to_discord(
+            message=(
+                "⚠️ Train Manager API returned an empty schedule for today.\n"
+                "Either mgtools.cloud is broken or the API contract changed.\n"
+                "Run with --debug and inspect train_notifier.log."
+            ),
             title="Train Manager: EMPTY SCHEDULE",
-            tags="warning,empty_nest",
             priority="high",
         )
         return 4
 
-    # --- Normalize & filter today's slots ---
     all_slots = normalize_slots(raw_slots)
     today_slots = [s for s in all_slots if s.get("day") == today_day_str]
     if not today_slots:
-        today_slots = all_slots  # fall back to whatever the API gave us
+        today_slots = all_slots
         log.warning("No `day` field matched today; using all returned slots.")
     log.info(f"Working with {len(today_slots)} slots for today.")
 
-    # --- Sort by price ---
     by_fuel = sorted(
         today_slots,
         key=lambda x: (
@@ -570,51 +497,28 @@ def main() -> int:
     top_4_spot = by_spot[:4]
 
     # --- Morning briefing ---
-    briefing_sent = False
     if send_briefing:
         briefing_msg = build_morning_briefing(top_4_fuel, top_4_spot, now)
-        log.info("Sending morning briefing...")
-        briefing_sent = send_to_ntfy(
-            topic=NTFY_TOPIC,
+        log.info("Sending morning briefing to Discord...")
+        briefing_sent = send_to_discord(
             message=briefing_msg,
             title=f"Train Manager: Daily Fuel & Spot Briefing ({current_time_12h})",
-            tags="train,clipboard,fuelpump,sparkles",
             priority="default",
         )
         if not briefing_sent:
             log.warning("Briefing failed to send — continuing to scheduling anyway.")
     else:
-        log.info(
-            f"Outside briefing window ({BRIEFING_START[0]:02d}:{BRIEFING_START[1]:02d}–"
-            f"{BRIEFING_END[0]:02d}:{BRIEFING_END[1]:02d} IST). Skipping briefing."
-        )
+        log.info(f"Outside briefing window. Skipping briefing.")
 
-    # --- Schedule exact-time alerts (BEFORE saving state) ---
-    fuel_n, spot_n, skipped = schedule_alerts(top_4_fuel, top_4_spot, now)
-    log.info(f"Scheduled: {fuel_n} fuel, {spot_n} spot, {skipped} skipped (past or unparseable).")
+    # --- Write scheduled_alerts.json (the poll-and-fire workflow reads this) ---
+    write_scheduled_alerts(top_4_fuel, top_4_spot, now)
 
-    # --- Save state AFTER everything (so a crash here doesn't lose the work) ---
+    # --- Save state AFTER everything (so a crash doesn't lose work) ---
     state["last_processed_date"] = today_str
-    state["last_run_status"] = "ok" if (fuel_n + spot_n) > 0 else "partial"
-    state["last_scheduled_fuel"] = fuel_n
-    state["last_scheduled_spot"] = spot_n
-    state["last_skipped_past"] = skipped
+    state["last_run_status"] = "ok"
+    state["last_scheduled_fuel"] = len(top_4_fuel)
+    state["last_scheduled_spot"] = len(top_4_spot)
     save_state(state)
-
-    # --- Final summary push if everything was skipped (e.g., script ran late) ---
-    if fuel_n + spot_n == 0:
-        send_to_ntfy(
-            NTFY_TOPIC,
-            (
-                "⚠️ Train Manager ran today but **scheduled ZERO alerts**.\n\n"
-                f"Skipped {skipped} slots (all past or unparseable).\n"
-                "Did you run the script late in the day? Run earlier tomorrow "
-                "(ideally inside the 06:00–07:00 IST window)."
-            ),
-            title="Train Manager: NO ALERTS SCHEDULED TODAY",
-            tags="warning,calendar",
-            priority="default",
-        )
 
     log.info("Run complete.")
     return 0
