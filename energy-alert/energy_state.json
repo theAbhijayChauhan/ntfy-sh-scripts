@@ -2,6 +2,6 @@
   "oil_alerted_ts": null,
   "coal_alerted_ts": null,
   "hydrogen_alerted_ts": null,
-  "co2_alerted_ts": 1792690276.3785183,
+  "co2_alerted_ts": null,
   "last_briefing_date": null
 }

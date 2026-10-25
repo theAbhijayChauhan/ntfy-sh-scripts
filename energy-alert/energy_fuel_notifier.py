@@ -3,30 +3,38 @@
  ⚡ Energy Manager - Hourly Live Market Tracker & Strict Emergency Alerts
  🏢 Company: abhijaysinghlimited
  🎯 Source: https://energymanagergame.com/ (Official Game Web Client)
- 🔔 ntfy Topic: abhijaysinghlimited-energy-fuel-alert
+ 🔔 Discord Webhook (via discord_notifier.py → #energy-alerts channel)
 ============================================================
 
 ✨ Features
-1. ENABLED switch   — set ENABLED = False to mute everything.
+1. ENABLED switch — set ENABLED = False to mute everything.
 2. Morning Briefing — sent ONCE per day inside a strict 06:30–07:30 IST window.
 3. Hourly Live Radar — checks prices every hour; silent unless thresholds breach.
 4. Strict Emergency Thresholds (silent unless in range):
-     • Oil       < $1.90   →  BUY OIL QUICKLY
+     • Oil       < $1.50   →  BUY OIL QUICKLY    (★ UPDATED from $1.90 → $1.50)
      • Coal      < $1.50   →  BUY COAL QUICKLY
-     • Hydrogen  > $90.00  →  SELL HYDROGEN QUICKLY
+     • Hydrogen  > $99.00  →  SELL HYDROGEN QUICKLY
      • CO2       < $20.00  →  BUY CO2 QUICKLY
      • Uranium   ignored.
 5. Cooldown dedup  — each commodity alerts at most once every 6 hours per dip.
-6. Self-test mode  — run with --test-notify to verify ntfy.sh works.
+6. Self-test mode  — run with --test-notify to verify Discord webhook works.
 7. Diagnostic mode — run with --debug to print full HTTP bodies to log file.
+
+Webhook setup
+-------------
+This script reads from the GitHub Secret `DISCORD_WEBHOOK_URL_ENERGY`,
+NOT the same `DISCORD_WEBHOOK_URL` that Train Manager uses. This
+keeps the two alert channels completely separate:
+  • DISCORD_WEBHOOK_URL       → #train-alerts channel
+  • DISCORD_WEBHOOK_URL_ENERGY → #energy-alerts channel
 
 Usage
 -----
   python energy_fuel_notifier.py                # normal hourly run
-  python energy_fuel_notifier.py --briefing     # force a morning briefing now
-  python energy_fuel_notifier.py --test-notify  # send a test push to ntfy
-  python energy_fuel_notifier.py --debug        # verbose logging
-  python energy_fuel_notifier.py --force        # ignore ENABLED flag and briefing window
+  python energy_fuel_notifier.py --briefing    # force morning briefing now
+  python energy_fuel_notifier.py --test-notify # send a test push to Discord
+  python energy_fuel_notifier.py --debug       # verbose logging
+  python energy_fuel_notifier.py --force       # ignore ENABLED + briefing window
 ============================================================
 """
 
@@ -43,6 +51,16 @@ from typing import Any, Optional
 import requests
 from zoneinfo import ZoneInfo
 
+# Add the script's own dir to path so we can import discord_notifier
+# (whether it lives in this folder or one level up at repo root).
+HERE = os.path.dirname(os.path.abspath(__file__))
+PARENT = os.path.dirname(HERE)
+for p in (HERE, PARENT):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from discord_notifier import send_to_discord  # noqa: E402
+
 # Force UTF-8 stdout (Windows terminals choke on emoji otherwise).
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -55,27 +73,26 @@ ENABLED = True
 # ============================================================
 #  CONFIGURATION
 # ============================================================
-NTFY_TOPIC = "abhijaysinghlimited-energy-fuel-alert"
+NTFY_TOPIC = "abhijaysinghlimited-energy-fuel-alert"  # legacy compat (Discord ignores it)
 TIMEZONE_NAME = "Asia/Kolkata"
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "energy_state.json")
 LOG_FILE = os.path.join(HERE, "energy_notifier.log")
 
-# Credentials — prefer env vars, fall back to defaults if vacant.
-EM_EMAIL = os.getenv("EM_EMAIL") or "abhijaychauhan98@duck.com"
-EM_PASSWORD = os.getenv("EM_PASSWORD") or "alok@singh"
+# Credentials — prefer env vars, fall back to defaults.
+EM_EMAIL = os.getenv("EM_EMAIL", "abhijaychauhan98@duck.com")
+EM_PASSWORD = os.getenv("EM_PASSWORD", "alok@singh")
 
 # --- Strict Emergency Thresholds ---
-OIL_BUY_THRESHOLD = 1.90          # Alert when Oil < $1.90
+OIL_BUY_THRESHOLD = 1.50          # ★ ALERT WHEN OIL < $1.50 (updated from $1.90)
 COAL_BUY_THRESHOLD = 1.50         # Alert when Coal < $1.50
-HYDROGEN_SELL_THRESHOLD = 90.00   # Alert when Hydrogen > $90.00
+HYDROGEN_SELL_THRESHOLD = 99.00   # Alert when Hydrogen > $99.00
 CO2_BUY_THRESHOLD = 20.00         # Alert when CO2 < $20.00
 
 # Daily briefing window (24h IST).
-BRIEFING_START = (6, 30)
-BRIEFING_END = (7, 30)
+BRIEFING_START = (6, 30)   # 06:30
+BRIEFING_END = (7, 30)     # 07:30
 
 # Don't re-alert the same commodity within this window.
 ALERT_COOLDOWN_SECONDS = 6 * 3600  # 6 hours
@@ -124,14 +141,13 @@ DEFAULT_STATE: dict[str, Any] = {
 def load_state() -> dict:
     """Load persistent alert state, merging with defaults for forward-compat."""
     state = dict(DEFAULT_STATE)
-    # Migrate old boolean keys → new timestamp keys if present.
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            # Migrate old boolean keys → new timestamp keys if present.
             for k in list(data.keys()):
                 if k.endswith("_alerted") and isinstance(data[k], bool):
-                    # Old boolean marker → treat as "alerted just now" only if True.
                     new_key = k.replace("_alerted", "_alerted_ts")
                     data[new_key] = time.time() if data[k] else None
                     del data[k]
@@ -167,13 +183,7 @@ def in_briefing_window(now: datetime.datetime) -> bool:
 #  AUTH
 # ============================================================
 def create_authenticated_session(retries: int = 3, delay: int = 5) -> Optional[requests.Session]:
-    """Log in to energymanagergame.com and STRICTLY verify success.
-
-    Returns a Session with auth cookies, or None on failure.
-    The previous version accepted any HTTP 200 as success — that was the
-    main bug: a failed-login page also returns 200, so the script thought
-    it was logged in while holding no auth cookies.
-    """
+    """Log in to energymanagergame.com and STRICTLY verify success."""
     session = requests.Session()
     session.headers.update(HEADERS)
 
@@ -210,7 +220,6 @@ def create_authenticated_session(retries: int = 3, delay: int = 5) -> Optional[r
 
             # Success criteria — require BOTH a 2xx status AND a session cookie.
             if res.status_code in (200, 302) and session.cookies:
-                # Heuristic: a real auth cookie typically named PHPSESSID or similar.
                 cookie_names = {c.name.lower() for c in session.cookies}
                 auth_like = any(
                     n in cookie_names
@@ -248,11 +257,7 @@ def _is_number(v: Any) -> bool:
 
 
 def _extract_price_series(data: Any) -> list[float]:
-    """Best-effort: pull a list of numeric prices out of an unknown JSON shape.
-
-    Handles: [1.2, 1.3] / [{"price":1.2}, ...] / {"history":[...]} /
-    {"current":1.2} — anything else returns [].
-    """
+    """Best-effort: pull a list of numeric prices out of an unknown JSON shape."""
     if isinstance(data, list):
         if not data:
             return []
@@ -297,7 +302,6 @@ def fetch_live_commodity_prices(session: requests.Session, retries: int = 3, del
                         f"{target}: response is not JSON ({e}). "
                         f"Body[:200]={r.text[:200]!r}"
                     )
-                    # If the body is HTML, the session isn't actually authenticated.
                     if "<html" in r.text.lower()[:200]:
                         log.error(
                             f"{target}: got HTML, not JSON → session is NOT logged in. "
@@ -332,51 +336,21 @@ def fetch_live_commodity_prices(session: requests.Session, retries: int = 3, del
 
 
 # ============================================================
-#  NOTIFICATIONS
+#  NOTIFICATIONS (Discord webhook → #energy-alerts)
 # ============================================================
-def send_to_ntfy(
-    topic: str,
-    message: str,
-    title: str,
-    tags: str = "factory,fuelpump",
-    priority: str = "default",
-) -> bool:
-    """Send a push notification to ntfy.sh. Returns True on 200 response."""
-    url = f"https://ntfy.sh/{topic}"
-    headers = {
-        "Title": title,
-        "Priority": priority,
-        "Tags": tags,
-        "Markdown": "yes",
-    }
-    try:
-        response = requests.post(
-            url, data=message.encode("utf-8"), headers=headers, timeout=15
-        )
-        if response.status_code == 200:
-            log.info(f"ntfy OK → {title}")
-            return True
-        log.error(f"ntfy FAIL: HTTP {response.status_code}: {response.text[:200]}")
-        return False
-    except requests.RequestException as e:
-        log.error(f"ntfy network error: {e}")
-        return False
-
-
 def send_test_notification() -> bool:
-    """Send a test push so the user can verify ntfy.sh / topic is correct."""
-    log.info(f"Sending TEST notification to ntfy.sh/{NTFY_TOPIC} ...")
-    return send_to_ntfy(
-        NTFY_TOPIC,
-        (
-            "✅ **Test notification from Energy Manager notifier.**\n\n"
-            "If you see this on your phone, your ntfy topic is configured "
-            "correctly and the script can reach ntfy.sh.\n\n"
-            "Subscribe to this topic in the ntfy mobile app:\n"
-            f"`{NTFY_TOPIC}`"
+    log.info("Sending TEST notification to Discord #energy-alerts webhook...")
+    return send_to_discord(
+        message=(
+            "✅ **Test from Energy Manager notifier.**\n\n"
+            "If you see this in your #energy-alerts channel, your webhook + script work.\n\n"
+            "Thresholds active:\n"
+            f"• Oil < ${OIL_BUY_THRESHOLD:.2f}  ★\n"
+            f"• Coal < ${COAL_BUY_THRESHOLD:.2f}\n"
+            f"• Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f}\n"
+            f"• CO2 < ${CO2_BUY_THRESHOLD:.2f}"
         ),
         title="Energy Manager: TEST",
-        tags="white_check_mark,test_tube",
         priority="default",
     )
 
@@ -451,10 +425,10 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
 
     # (key, threshold, direction, action, emoji, tags, summary)
     checks = [
-        ("oil",       OIL_BUY_THRESHOLD,      "below", "BUY OIL QUICKLY",       "🛢️", "rotating_light,fuelpump,warning",   "Oil price crashed below your buy threshold!"),
-        ("coal",      COAL_BUY_THRESHOLD,     "below", "BUY COAL QUICKLY",     "🪨", "rotating_light,fire,warning",      "Coal price crashed below your buy threshold!"),
-        ("hydrogen",  HYDROGEN_SELL_THRESHOLD, "above", "SELL HYDROGEN QUICKLY", "💧", "rotating_light,money_with_wings,zap", "Hydrogen surged past your sell target!"),
-        ("co2",       CO2_BUY_THRESHOLD,      "below", "BUY CO2 QUICKLY",      "🍃", "rotating_light,recycle,warning",   "CO2 quota price dropped below your target!"),
+        ("oil",      OIL_BUY_THRESHOLD,       "below", "BUY OIL QUICKLY",        "🛢️", "rotating_light,fuelpump,warning",     "Oil price crashed below your $1.50 buy threshold!"),
+        ("coal",     COAL_BUY_THRESHOLD,      "below", "BUY COAL QUICKLY",      "🪨", "rotating_light,fire,warning",       "Coal price crashed below your buy threshold!"),
+        ("hydrogen", HYDROGEN_SELL_THRESHOLD, "above", "SELL HYDROGEN QUICKLY", "💧", "rotating_light,money_with_wings,zap", "Hydrogen surged past your $99 sell target!"),
+        ("co2",      CO2_BUY_THRESHOLD,        "below", "BUY CO2 QUICKLY",       "🍃", "rotating_light,recycle,warning",     "CO2 quota price dropped below your target!"),
     ]
 
     for key, threshold, direction, action, emoji, tags, summary in checks:
@@ -481,7 +455,7 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
                 f"{summary}\n"
                 f"👉 Open **Energy Manager** and act now!"
             )
-            if send_to_ntfy(NTFY_TOPIC, msg, title, tags=tags, priority="urgent"):
+            if send_to_discord(message=msg, title=title, tags=tags, priority="urgent"):
                 state[f"{key}_alerted_ts"] = time.time()
                 alerts_sent += 1
         else:
@@ -527,8 +501,9 @@ def main() -> int:
     log.info("=" * 60)
     log.info(" ⚡ Energy Manager Live Tracker - abhijaysinghlimited")
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
-    log.info(f" Topic: {NTFY_TOPIC}")
     log.info(f" Mode : {'Daily Briefing + Radar' if should_send_briefing else 'Silent Hourly Radar'}")
+    log.info(f" Oil threshold: < ${OIL_BUY_THRESHOLD:.2f}  ★")
+    log.info(f" Hydrogen threshold: > ${HYDROGEN_SELL_THRESHOLD:.2f}")
     log.info("=" * 60)
 
     # --- Login ---
@@ -536,9 +511,8 @@ def main() -> int:
     session = create_authenticated_session()
     if not session:
         log.error("Login failed. Sending a failure notification and exiting.")
-        send_to_ntfy(
-            NTFY_TOPIC,
-            (
+        send_to_discord(
+            message=(
                 "⚠️ Energy Manager notifier could NOT log in.\n\n"
                 "Likely causes:\n"
                 "• Wrong EM_EMAIL / EM_PASSWORD\n"
@@ -548,7 +522,6 @@ def main() -> int:
                 "No price checks were performed."
             ),
             title="Energy Manager: LOGIN FAILED",
-            tags="warning,lock",
             priority="high",
         )
         return 3
@@ -559,9 +532,8 @@ def main() -> int:
 
     if not market:
         log.error("No market data retrieved. Sending a failure notification and exiting.")
-        send_to_ntfy(
-            NTFY_TOPIC,
-            (
+        send_to_discord(
+            message=(
                 "⚠️ Energy Manager notifier could not fetch ANY market data.\n\n"
                 "Likely causes:\n"
                 "• Price API endpoint changed (`api/price.history.api.php`)\n"
@@ -571,7 +543,6 @@ def main() -> int:
                 "raw HTTP responses."
             ),
             title="Energy Manager: NO MARKET DATA",
-            tags="warning,chart_decreasing",
             priority="high",
         )
         return 4
@@ -579,12 +550,10 @@ def main() -> int:
     # --- Briefing ---
     if should_send_briefing:
         briefing_msg = build_morning_briefing(market, now)
-        log.info("Sending morning briefing...")
-        if send_to_ntfy(
-            NTFY_TOPIC,
-            briefing_msg,
+        log.info("Sending morning briefing to Discord #energy-alerts...")
+        if send_to_discord(
+            message=briefing_msg,
             title=f"Energy Manager: Daily Market Briefing ({current_time_12h})",
-            tags="factory,clipboard,zap,sparkles",
             priority="default",
         ):
             state["last_briefing_date"] = today_str

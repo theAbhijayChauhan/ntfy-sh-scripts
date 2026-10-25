@@ -4,24 +4,16 @@ on:
   schedule:
     # 1. Morning Briefing Retry Window: 06:30 AM to 07:30 AM IST
     #    = 01:00 UTC to 02:00 UTC (IST = UTC + 5:30)
-    #    Tries every 10 minutes until the morning briefing is sent once,
-    #    then the script's state dedup skips subsequent runs for the day.
     - cron: '0,10,20,30,40,50 1 * * *'
     - cron: '0 2 * * *'
     # 2. Hourly Live Radar: 07:48 AM to 11:48 PM IST
     #    = 02:18 UTC to 18:18 UTC
-    #    Runs at minute :18 of each hour to avoid the GitHub-cron top-of-hour
-    #    congestion that can delay scheduled runs.
     - cron: '18 2-18 * * *'
   workflow_dispatch:
 
-# Least-privilege token — this job only checks out code and runs Python.
 permissions:
   contents: read
 
-# Prevent two concurrent runs from racing on the same cache state.
-# cancel-in-progress: false ensures an in-flight run finishes cleanly
-# rather than being killed mid-state-write.
 concurrency:
   group: energy-tracker
   cancel-in-progress: false
@@ -38,9 +30,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: energy-alert/energy_state.json
-          # Always-unique key → cache is always re-saved at end of job
-          # with the latest state. restore-keys prefix-match recovers
-          # the most recent previously-saved state.
           key: energy-state-${{ github.run_id }}
           restore-keys: |
             energy-state-
@@ -50,8 +39,6 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-          # Invalidation key includes the actual requirements file
-          # so the pip cache bumps when dependencies change.
           cache-dependency-path: energy-alert/requirements.txt
 
       - name: Install dependencies
@@ -61,7 +48,11 @@ jobs:
 
       - name: Run Energy Manager Live Tracker
         env:
-          EM_EMAIL: ${{ secrets.EM_EMAIL || 'abhijaychauhan98@duck.com' }}
-          EM_PASSWORD: ${{ secrets.EM_PASSWORD || 'alok@singh' }}
+          # Energy Manager game credentials (GitHub Secrets):
+          EM_EMAIL: ${{ secrets.EM_EMAIL }}
+          EM_PASSWORD: ${{ secrets.EM_PASSWORD }}
+          # ★ Energy-specific Discord webhook → #energy-alerts channel.
+          # Separate from DISCORD_WEBHOOK_URL (which goes to #train-alerts).
+          DISCORD_WEBHOOK_URL_ENERGY: ${{ secrets.DISCORD_WEBHOOK_URL_ENERGY }}
         run: |
           python energy-alert/energy_fuel_notifier.py
