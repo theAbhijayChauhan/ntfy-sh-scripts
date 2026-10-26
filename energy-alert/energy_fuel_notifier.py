@@ -1,6 +1,6 @@
 """
 ============================================================
- ⚡ Energy Manager - Hourly Live Market Tracker & Strict Emergency Alerts
+ ⚡ Energy Manager - 24/7 Live Market Tracker & Emergency Alerts
  🏢 Company: abhijaysinghlimited
  🎯 Source: https://energymanagergame.com/ (Official Game Web Client)
  🔔 Discord Webhook (via discord_notifier.py → #energy-alerts channel)
@@ -8,33 +8,23 @@
 
 ✨ Features
 1. ENABLED switch — set ENABLED = False to mute everything.
-2. Morning Briefing — sent ONCE per day inside a strict 06:30–07:30 IST window.
-3. Hourly Live Radar — checks prices every hour; silent unless thresholds breach.
-4. Strict Emergency Thresholds (silent unless in range):
-     • Oil       < $1.50   →  BUY OIL QUICKLY    (★ UPDATED from $1.90 → $1.50)
+2. 24/7 Live Radar — runs every hour at :30 (e.g. 7:30, 8:30, 9:30...).
+3. Timing Safety — if triggered at :28 or :29, waits until :30:05 before fetching
+   so it never checks old prices before the game refreshes.
+4. Strict Emergency Thresholds (strictly silent unless breached):
+     • Oil       < $1.50   →  BUY OIL QUICKLY
      • Coal      < $1.50   →  BUY COAL QUICKLY
      • Hydrogen  > $99.00  →  SELL HYDROGEN QUICKLY
      • CO2       < $20.00  →  BUY CO2 QUICKLY
-     • Uranium   ignored.
 5. Cooldown dedup  — each commodity alerts at most once every 6 hours per dip.
-6. Self-test mode  — run with --test-notify to verify Discord webhook works.
-7. Diagnostic mode — run with --debug to print full HTTP bodies to log file.
-
-Webhook setup
--------------
-This script reads from the GitHub Secret `DISCORD_WEBHOOK_URL_ENERGY`,
-NOT the same `DISCORD_WEBHOOK_URL` that Train Manager uses. This
-keeps the two alert channels completely separate:
-  • DISCORD_WEBHOOK_URL       → #train-alerts channel
-  • DISCORD_WEBHOOK_URL_ENERGY → #energy-alerts channel
+6. Diagnostic mode — run with --debug to print full HTTP bodies to log file.
 
 Usage
 -----
-  python energy_fuel_notifier.py                # normal hourly run
-  python energy_fuel_notifier.py --briefing    # force morning briefing now
+  python energy_fuel_notifier.py                # normal hourly radar check
   python energy_fuel_notifier.py --test-notify # send a test push to Discord
   python energy_fuel_notifier.py --debug       # verbose logging
-  python energy_fuel_notifier.py --force       # ignore ENABLED + briefing window
+  python energy_fuel_notifier.py --force       # ignore cooldown and check
 ============================================================
 """
 
@@ -52,7 +42,6 @@ import requests
 from zoneinfo import ZoneInfo
 
 # Add the script's own dir to path so we can import discord_notifier
-# (whether it lives in this folder or one level up at repo root).
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(HERE)
 for p in (HERE, PARENT):
@@ -73,7 +62,6 @@ ENABLED = True
 # ============================================================
 #  CONFIGURATION
 # ============================================================
-NTFY_TOPIC = "abhijaysinghlimited-energy-fuel-alert"  # legacy compat (Discord ignores it)
 TIMEZONE_NAME = "Asia/Kolkata"
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 
@@ -85,19 +73,15 @@ EM_EMAIL = os.getenv("EM_EMAIL", "abhijaychauhan98@duck.com")
 EM_PASSWORD = os.getenv("EM_PASSWORD", "alok@singh")
 
 # --- Strict Emergency Thresholds ---
-OIL_BUY_THRESHOLD = 1.50          # ★ ALERT WHEN OIL < $1.50 (updated from $1.90)
+OIL_BUY_THRESHOLD = 1.50          # Alert when Oil < $1.50
 COAL_BUY_THRESHOLD = 1.50         # Alert when Coal < $1.50
 HYDROGEN_SELL_THRESHOLD = 99.00   # Alert when Hydrogen > $99.00
 CO2_BUY_THRESHOLD = 20.00         # Alert when CO2 < $20.00
 
-# Daily briefing window (24h IST).
-BRIEFING_START = (6, 30)   # 06:30
-BRIEFING_END = (7, 30)     # 07:30
-
 # Don't re-alert the same commodity within this window.
 ALERT_COOLDOWN_SECONDS = 6 * 3600  # 6 hours
 
-# API endpoints. Adjust ONLY if the site changes.
+# API endpoints.
 BASE_URL = "https://energymanagergame.com"
 LOGIN_URL = f"{BASE_URL}/weblogin/signin.php"
 PRICE_API_URL = f"{BASE_URL}/api/price.history.api.php"
@@ -134,7 +118,6 @@ DEFAULT_STATE: dict[str, Any] = {
     "coal_alerted_ts": None,
     "hydrogen_alerted_ts": None,
     "co2_alerted_ts": None,
-    "last_briefing_date": None,
 }
 
 
@@ -145,13 +128,11 @@ def load_state() -> dict:
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Migrate old boolean keys → new timestamp keys if present.
-            for k in list(data.keys()):
-                if k.endswith("_alerted") and isinstance(data[k], bool):
-                    new_key = k.replace("_alerted", "_alerted_ts")
-                    data[new_key] = time.time() if data[k] else None
-                    del data[k]
-            state.update(data)
+            if isinstance(data, dict):
+                # Clean up legacy keys if present
+                for k in list(data.keys()):
+                    if k in state:
+                        state[k] = data[k]
         except Exception as e:
             log.warning(f"State file unreadable ({e}); using defaults.")
     return state
@@ -169,21 +150,10 @@ def save_state(state: dict) -> None:
 
 
 # ============================================================
-#  TIME HELPERS
-# ============================================================
-def in_briefing_window(now: datetime.datetime) -> bool:
-    """Return True if `now` (local) is inside [06:30, 07:30] inclusive."""
-    mins = now.hour * 60 + now.minute
-    start = BRIEFING_START[0] * 60 + BRIEFING_START[1]
-    end = BRIEFING_END[0] * 60 + BRIEFING_END[1]
-    return start <= mins <= end
-
-
-# ============================================================
 #  AUTH
 # ============================================================
 def create_authenticated_session(retries: int = 3, delay: int = 5) -> Optional[requests.Session]:
-    """Log in to energymanagergame.com and STRICTLY verify success."""
+    """Log in to energymanagergame.com and verify success."""
     session = requests.Session()
     session.headers.update(HEADERS)
 
@@ -205,20 +175,17 @@ def create_authenticated_session(retries: int = 3, delay: int = 5) -> Optional[r
                 f"cookies={dict(session.cookies)} body[:200]={res.text[:200]!r}"
             )
 
-            # Hard-fail markers — even with HTTP 200 these mean login failed.
             failure_markers = [
                 "incorrect", "invalid", "wrong password", "login failed",
                 "unauthorized", "error", "access denied",
             ]
             if any(m in body_lower for m in failure_markers) and "success" not in body_lower:
                 log.error(
-                    f"Login attempt {attempt} rejected by server. "
-                    f"Body snippet: {res.text[:300]!r}"
+                    f"Login attempt {attempt} rejected by server: {res.text[:300]!r}"
                 )
                 time.sleep(delay)
                 continue
 
-            # Success criteria — require BOTH a 2xx status AND a session cookie.
             if res.status_code in (200, 302) and session.cookies:
                 cookie_names = {c.name.lower() for c in session.cookies}
                 auth_like = any(
@@ -229,13 +196,11 @@ def create_authenticated_session(retries: int = 3, delay: int = 5) -> Optional[r
                     log.info(f"Login OK (attempt {attempt}, status {res.status_code}).")
                     return session
                 log.warning(
-                    f"Login attempt {attempt}: 2xx but cookies look non-auth: "
-                    f"{cookie_names}"
+                    f"Login attempt {attempt}: non-auth cookies: {cookie_names}"
                 )
             else:
                 log.warning(
-                    f"Login attempt {attempt}: status={res.status_code}, "
-                    f"cookies_set={bool(session.cookies)}"
+                    f"Login attempt {attempt}: status={res.status_code}, cookies_set={bool(session.cookies)}"
                 )
         except requests.RequestException as e:
             log.error(f"Login attempt {attempt} network error: {e}")
@@ -298,23 +263,12 @@ def fetch_live_commodity_prices(session: requests.Session, retries: int = 3, del
                 try:
                     data = r.json()
                 except ValueError as e:
-                    log.error(
-                        f"{target}: response is not JSON ({e}). "
-                        f"Body[:200]={r.text[:200]!r}"
-                    )
-                    if "<html" in r.text.lower()[:200]:
-                        log.error(
-                            f"{target}: got HTML, not JSON → session is NOT logged in. "
-                            f"Check credentials or login URL."
-                        )
+                    log.error(f"{target}: response is not JSON ({e}). Body[:200]={r.text[:200]!r}")
                     break
 
                 history = _extract_price_series(data)
                 if not history:
-                    log.warning(
-                        f"{target}: couldn't find numeric series in response "
-                        f"(shape: {str(data)[:200]})"
-                    )
+                    log.warning(f"{target}: couldn't find numeric series in response: {str(data)[:200]}")
                     break
 
                 market[target] = {
@@ -325,8 +279,7 @@ def fetch_live_commodity_prices(session: requests.Session, retries: int = 3, del
                 }
                 log.info(
                     f"{target:>8}: current=${history[-1]:.2f} "
-                    f"(min=${min(history):.2f}, max=${max(history):.2f}, "
-                    f"samples={len(history)})"
+                    f"(min=${min(history):.2f}, max=${max(history):.2f}, samples={len(history)})"
                 )
                 break
             except requests.RequestException as e:
@@ -336,16 +289,17 @@ def fetch_live_commodity_prices(session: requests.Session, retries: int = 3, del
 
 
 # ============================================================
-#  NOTIFICATIONS (Discord webhook → #energy-alerts)
+#  NOTIFICATIONS
 # ============================================================
 def send_test_notification() -> bool:
     log.info("Sending TEST notification to Discord #energy-alerts webhook...")
     return send_to_discord(
         message=(
-            "✅ **Test from Energy Manager notifier.**\n\n"
-            "If you see this in your #energy-alerts channel, your webhook + script work.\n\n"
+            "✅ **Test from Energy Manager 24/7 Live Radar.**\n\n"
+            "If you see this in your #energy-alerts channel, your Energy "
+            "webhook + script work.\n\n"
             "Thresholds active:\n"
-            f"• Oil < ${OIL_BUY_THRESHOLD:.2f}  ★\n"
+            f"• Oil < ${OIL_BUY_THRESHOLD:.2f}\n"
             f"• Coal < ${COAL_BUY_THRESHOLD:.2f}\n"
             f"• Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f}\n"
             f"• CO2 < ${CO2_BUY_THRESHOLD:.2f}"
@@ -353,56 +307,6 @@ def send_test_notification() -> bool:
         title="Energy Manager: TEST",
         priority="default",
     )
-
-
-# ============================================================
-#  BRIEFING
-# ============================================================
-def build_morning_briefing(market: dict, now: datetime.datetime) -> str:
-    date_str = now.strftime("%A, %d %B %Y")
-    current_time_12h = now.strftime("%I:%M %p")
-
-    lines = [
-        "⚡ ━━━━━━━━━━━━━━━━━━━━━━━━━ ⚡",
-        "      ENERGY MANAGER • MARKET BRIEFING",
-        "             abhijaysinghlimited",
-        "⚡ ━━━━━━━━━━━━━━━━━━━━━━━━━ ⚡",
-        f"📅 **Date:** {date_str} | ⏰ **Time:** {current_time_12h} IST",
-        f"📡 **Account:** `{EM_EMAIL}`",
-        "",
-        "📊 ━━━ 🌐 LIVE COMMODITY SNAPSHOT ━━━ 📊",
-    ]
-
-    if "oil" in market:
-        c = market["oil"]["current"]
-        status = "🟢 CRITICAL BUY!" if c < OIL_BUY_THRESHOLD else "⏳ NORMAL"
-        lines.append(
-            f"• 🛢️ **Oil:** **${c:.2f}** *(Target: < ${OIL_BUY_THRESHOLD:.2f})* {status}"
-        )
-    if "coal" in market:
-        c = market["coal"]["current"]
-        status = "🟢 CRITICAL BUY!" if c < COAL_BUY_THRESHOLD else "⏳ NORMAL"
-        lines.append(
-            f"• 🪨 **Coal:** **${c:.2f}** *(Target: < ${COAL_BUY_THRESHOLD:.2f})* {status}"
-        )
-    if "hydrogen" in market:
-        c = market["hydrogen"]["current"]
-        status = "🚀 PEAK SELL!" if c > HYDROGEN_SELL_THRESHOLD else "⏳ HOLDING"
-        lines.append(
-            f"• 💧 **Hydrogen:** **${c:.2f}** *(Target: > ${HYDROGEN_SELL_THRESHOLD:.2f})* {status}"
-        )
-    if "co2" in market:
-        c = market["co2"]["current"]
-        status = "🟢 CRITICAL BUY!" if c < CO2_BUY_THRESHOLD else "⏳ NORMAL"
-        lines.append(
-            f"• 🍃 **CO2 Quota:** **${c:.2f}** *(Target: < ${CO2_BUY_THRESHOLD:.2f})* {status}"
-        )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🚨 **STRICT HOURLY RADAR ACTIVE:**")
-    lines.append("📱 You'll get an emergency alert only when a price enters your target range.")
-    return "\n".join(lines)
 
 
 # ============================================================
@@ -420,13 +324,12 @@ def _within_cooldown(state: dict, key: str) -> bool:
 
 
 def check_emergency_conditions(market: dict, state: dict, current_time_12h: str) -> tuple[dict, int]:
-    """Send one emergency alert per dip, with a cooldown so we don't spam you."""
+    """Send one emergency alert per dip, strictly silent otherwise."""
     alerts_sent = 0
 
-    # (key, threshold, direction, action, emoji, tags, summary)
     checks = [
         ("oil",      OIL_BUY_THRESHOLD,       "below", "BUY OIL QUICKLY",        "🛢️", "rotating_light,fuelpump,warning",     "Oil price crashed below your $1.50 buy threshold!"),
-        ("coal",     COAL_BUY_THRESHOLD,      "below", "BUY COAL QUICKLY",      "🪨", "rotating_light,fire,warning",       "Coal price crashed below your buy threshold!"),
+        ("coal",     COAL_BUY_THRESHOLD,      "below", "BUY COAL QUICKLY",      "🪨", "rotating_light,fire,warning",       "Coal price crashed below your $1.50 buy threshold!"),
         ("hydrogen", HYDROGEN_SELL_THRESHOLD, "above", "SELL HYDROGEN QUICKLY", "💧", "rotating_light,money_with_wings,zap", "Hydrogen surged past your $99 sell target!"),
         ("co2",      CO2_BUY_THRESHOLD,        "below", "BUY CO2 QUICKLY",       "🍃", "rotating_light,recycle,warning",     "CO2 quota price dropped below your target!"),
     ]
@@ -439,7 +342,7 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
 
         if triggered:
             if _within_cooldown(state, key):
-                log.info(f"{key}: triggered (${price:.2f}) but in cooldown. Skipping.")
+                log.info(f"{key}: triggered (${price:.2f}) but in cooldown. Skipping duplicate.")
                 continue
             title = f"{action} (${price:.2f})"
             msg = (
@@ -459,7 +362,6 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
                 state[f"{key}_alerted_ts"] = time.time()
                 alerts_sent += 1
         else:
-            # Price normalized — clear the marker so the NEXT dip alerts fresh.
             if state.get(f"{key}_alerted_ts") is not None:
                 log.info(f"{key}: normalized (${price:.2f}). Clearing alert marker.")
                 state[f"{key}_alerted_ts"] = None
@@ -468,10 +370,9 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
 
 
 # ============================================================
-#  MAIN
+#  MAIN RUNNER
 # ============================================================
 def main() -> int:
-    # --- Special: self-test ---
     if "--test-notify" in sys.argv:
         ok = send_test_notification()
         return 0 if ok else 1
@@ -480,99 +381,71 @@ def main() -> int:
         log.info("Energy alerts are DISABLED (ENABLED=False). Exiting.")
         return 0
 
-    # --- Validate config ---
     if not EM_EMAIL or not EM_PASSWORD:
-        log.error("EM_EMAIL or EM_PASSWORD is empty. Set env vars or update script defaults.")
+        log.error("EM_EMAIL or EM_PASSWORD is empty. Set env vars.")
         return 2
 
+    # --- TIMING SAFETY GUARD ---
+    # Prices in Energy Manager refresh at :30 past the hour (e.g. 7:30, 8:30).
+    # If triggered slightly early at :28 or :29, wait until :30:05 before fetching
+    # so we never check old/stale prices from the previous hour.
     now = datetime.datetime.now(LOCAL_TZ)
+    if now.minute in (28, 29):
+        wait_sec = (29 - now.minute) * 60 + (60 - now.second) + 5
+        log.info(
+            f"Triggered early at {now.strftime('%I:%M:%S %p')} (:28/:29). "
+            f"Waiting {wait_sec}s until :30:05 to fetch fresh market prices..."
+        )
+        time.sleep(wait_sec)
+        now = datetime.datetime.now(LOCAL_TZ)
+
     current_time_12h = now.strftime("%I:%M %p")
-    today_str = now.strftime("%Y-%m-%d")
-
-    state = load_state()
-
-    # --- Briefing decision (FIXED — strict window, once per day) ---
-    should_send_briefing = (
-        "--briefing" in sys.argv
-        or "--force" in sys.argv
-        or (state.get("last_briefing_date") != today_str)
-    )
 
     log.info("=" * 60)
-    log.info(" ⚡ Energy Manager Live Tracker - abhijaysinghlimited")
+    log.info(" ⚡ Energy Manager 24/7 Live Tracker - abhijaysinghlimited")
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
-    log.info(f" Mode : {'Daily Briefing + Radar' if should_send_briefing else 'Silent Hourly Radar'}")
-    log.info(f" Oil threshold: < ${OIL_BUY_THRESHOLD:.2f}  ★")
-    log.info(f" Hydrogen threshold: > ${HYDROGEN_SELL_THRESHOLD:.2f}")
+    log.info(" Mode : Silent Hourly Radar (Notifies ONLY when threshold breaches)")
+    log.info(f" Targets: Oil < ${OIL_BUY_THRESHOLD:.2f} | Coal < ${COAL_BUY_THRESHOLD:.2f}")
+    log.info(f"          Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f} | CO2 < ${CO2_BUY_THRESHOLD:.2f}")
     log.info("=" * 60)
 
-    # --- Login ---
+    # 1. Login
     log.info("Logging in to energymanagergame.com...")
     session = create_authenticated_session()
     if not session:
-        log.error("Login failed. Sending a failure notification and exiting.")
+        log.error("Login failed.")
         send_to_discord(
             message=(
                 "⚠️ Energy Manager notifier could NOT log in.\n\n"
-                "Likely causes:\n"
-                "• Wrong EM_EMAIL / EM_PASSWORD\n"
-                "• Login endpoint changed (`weblogin/signin.php`)\n"
-                "• Account locked / captcha required\n\n"
                 f"Account: `{EM_EMAIL}`\n"
-                "No price checks were performed."
+                "Please verify your credentials."
             ),
             title="Energy Manager: LOGIN FAILED",
             priority="high",
         )
         return 3
 
-    # --- Fetch prices ---
+    # 2. Fetch live prices
     log.info("Fetching live commodity prices...")
     market = fetch_live_commodity_prices(session)
-
     if not market:
-        log.error("No market data retrieved. Sending a failure notification and exiting.")
+        log.error("No market data retrieved.")
         send_to_discord(
-            message=(
-                "⚠️ Energy Manager notifier could not fetch ANY market data.\n\n"
-                "Likely causes:\n"
-                "• Price API endpoint changed (`api/price.history.api.php`)\n"
-                "• Session authenticated but API returns different JSON shape\n"
-                "• Site under maintenance\n\n"
-                "Run with --debug and inspect energy_notifier.log to see the "
-                "raw HTTP responses."
-            ),
+            message="⚠️ Energy Manager notifier could not fetch live market prices.",
             title="Energy Manager: NO MARKET DATA",
             priority="high",
         )
         return 4
 
-    # --- Briefing ---
-    if should_send_briefing:
-        briefing_msg = build_morning_briefing(market, now)
-        log.info("Sending morning briefing to Discord #energy-alerts...")
-        if send_to_discord(
-            message=briefing_msg,
-            title=f"Energy Manager: Daily Market Briefing ({current_time_12h})",
-            priority="default",
-        ):
-            state["last_briefing_date"] = today_str
-            save_state(state)
-    else:
-        log.info(
-            f"Briefing not sent — outside 06:30–07:30 window or already sent today ({today_str})."
-        )
-
-    # --- Emergency checks ---
-    log.info("Checking emergency thresholds...")
+    # 3. Emergency checks (silent unless breached)
+    state = load_state()
     state, alerts_sent = check_emergency_conditions(market, state, current_time_12h)
-    if alerts_sent == 0:
-        log.info("All commodities outside emergency range. Zero alerts sent.")
-    else:
-        log.info(f"Total emergency alerts sent: {alerts_sent}")
-
     save_state(state)
-    log.info("Run complete.")
+
+    if alerts_sent == 0:
+        log.info("All commodities within normal range or in cooldown. Strictly silent.")
+
+    log.info(f"Run complete. Alerts fired: {alerts_sent}.")
     return 0
 
 

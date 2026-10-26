@@ -2,14 +2,8 @@ name: Energy Manager Hourly Live Tracker
 
 on:
   schedule:
-    # 1. Morning Briefing Retry Window: 06:30 AM to 07:30 AM IST
-    #    = 01:00 UTC to 02:00 UTC (IST = UTC + 5:30)
-    - cron: '0,10,20,30,40,50 1 * * *'
-    - cron: '0 2 * * *'
-    # 2. Live Radar: checks every 20 minutes (at :08, :28, :48) from 07:38 AM to 11:48 PM IST
-    #    = 02:08 UTC to 18:48 UTC.
-    #    Runs 3x/hour at off-peak minutes to catch rapid price spikes (like Hydrogen > $99).
-    - cron: '8,28,48 2-18 * * *'
+    # 24/7 Live Radar: runs every hour at :30 past the hour
+    - cron: '30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -49,11 +43,8 @@ jobs:
 
       - name: Run Energy Manager Live Tracker
         env:
-          # Energy Manager game credentials (GitHub Secrets):
           EM_EMAIL: ${{ secrets.EM_EMAIL }}
           EM_PASSWORD: ${{ secrets.EM_PASSWORD }}
-          # ★ Energy-specific Discord webhook → #energy-alerts channel.
-          # Separate from DISCORD_WEBHOOK_URL (which goes to #train-alerts).
           DISCORD_WEBHOOK_URL_ENERGY: ${{ secrets.DISCORD_WEBHOOK_URL_ENERGY }}
         run: |
           python energy-alert/energy_fuel_notifier.py

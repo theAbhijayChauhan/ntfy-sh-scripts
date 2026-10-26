@@ -72,11 +72,11 @@ TM_EMAIL = os.getenv("TM_EMAIL") or os.getenv("EM_EMAIL", "abhijaychauhan98@duck
 TM_PASSWORD = os.getenv("TM_PASSWORD") or os.getenv("EM_PASSWORD", "alok@singh")
 
 # --- Strict Emergency Buy Thresholds ---
-# In Train Manager:
-# • Fuel normal range is $2,000 - $7,000+. Lowest dips hit <= $2,400.
-# • Spot normal range is $600 - $1,600+. Lowest dips hit <= $800.
-FUEL_BUY_THRESHOLD = 2400.0   # Alert when Fuel <= $2,400 / 1,000 L
-SPOT_BUY_THRESHOLD = 800.0    # Alert when Spot <= $800 / 1,000 kWh
+# User targets:
+# • Fuel < $2,600 / 1,000 L
+# • Spot < $600 / 1,000 kWh
+FUEL_BUY_THRESHOLD = 2600.0   # Alert strictly when Fuel < $2,600 / 1,000 L
+SPOT_BUY_THRESHOLD = 600.0    # Alert strictly when Spot < $600 / 1,000 kWh
 
 # Don't re-alert the same commodity within this window while it stays low.
 ALERT_COOLDOWN_SECONDS = 2 * 3600  # 2 hours
@@ -297,13 +297,13 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
         f"Spot=${spot:,.0f} (recent min=${spot_min}, max=${spot_max})"
     )
 
-    # 1. FUEL CHECK
+    # 1. FUEL CHECK (strictly less than $2,600)
     if fuel is not None:
-        if fuel <= FUEL_BUY_THRESHOLD:
+        if fuel < FUEL_BUY_THRESHOLD:
             if _within_cooldown(state, "fuel"):
                 log.info(f"Fuel: triggered (${fuel:,.0f}) but in cooldown. Skipping duplicate.")
             else:
-                log.info(f"🚨 CRITICAL: Fuel price ${fuel:,.0f} <= ${FUEL_BUY_THRESHOLD:,.0f} threshold!")
+                log.info(f"🚨 CRITICAL: Fuel price ${fuel:,.0f} < ${FUEL_BUY_THRESHOLD:,.0f} threshold!")
                 title = f"BUY FUEL QUICKLY: ${fuel:,.0f} at {current_time_12h}"
                 msg = (
                     f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
@@ -311,13 +311,13 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
                     f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
                     f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
                     f"💰 **Fuel Price:** **${fuel:,.0f}** / 1,000 L\n"
-                    f"🎯 **Your Target:** <= ${FUEL_BUY_THRESHOLD:,.0f}\n"
+                    f"🎯 **Your Target:** < ${FUEL_BUY_THRESHOLD:,.0f}\n"
                     f"⚡ **Spot Power:** ${spot:,.0f} / 1,000 kWh\n"
                     f"📊 **Recent Range:** ${fuel_min} – ${fuel_max}\n"
                     f"🏢 **Company:** abhijaysinghlimited\n\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-                    f"Fuel price is at a rock-bottom rate in **Train Manager**!\n"
+                    f"Fuel price dropped below **$2,600** in **Train Manager**!\n"
                     f"👉 Open **Train Manager** and fill your tanks now!"
                 )
                 if send_to_discord(message=msg, title=title, priority="urgent"):
@@ -326,16 +326,16 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
         else:
             # Normalized — clear alert marker so the NEXT dip alerts fresh
             if state.get("fuel_alerted_ts") is not None:
-                log.info(f"Fuel normalized (${fuel:,.0f} > ${FUEL_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
+                log.info(f"Fuel normalized (${fuel:,.0f} >= ${FUEL_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
                 state["fuel_alerted_ts"] = None
 
-    # 2. SPOT CHECK
+    # 2. SPOT CHECK (strictly less than $600)
     if spot is not None:
-        if spot <= SPOT_BUY_THRESHOLD:
+        if spot < SPOT_BUY_THRESHOLD:
             if _within_cooldown(state, "spot"):
                 log.info(f"Spot: triggered (${spot:,.0f}) but in cooldown. Skipping duplicate.")
             else:
-                log.info(f"🚨 CRITICAL: Spot price ${spot:,.0f} <= ${SPOT_BUY_THRESHOLD:,.0f} threshold!")
+                log.info(f"🚨 CRITICAL: Spot price ${spot:,.0f} < ${SPOT_BUY_THRESHOLD:,.0f} threshold!")
                 title = f"BUY SPOT QUICKLY: ${spot:,.0f} at {current_time_12h}"
                 msg = (
                     f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
@@ -343,13 +343,13 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
                     f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
                     f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
                     f"⚡ **Spot Price:** **${spot:,.0f}** / 1,000 kWh\n"
-                    f"🎯 **Your Target:** <= ${SPOT_BUY_THRESHOLD:,.0f}\n"
+                    f"🎯 **Your Target:** < ${SPOT_BUY_THRESHOLD:,.0f}\n"
                     f"⛽ **Fuel Price:** ${fuel:,.0f} / 1,000 L\n"
                     f"📊 **Recent Range:** ${spot_min} – ${spot_max}\n"
                     f"🏢 **Company:** abhijaysinghlimited\n\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-                    f"Spot electricity is at its cheapest rate in **Train Manager**!\n"
+                    f"Spot electricity dropped below **$600** in **Train Manager**!\n"
                     f"👉 Open **Train Manager** and lock your spot power now!"
                 )
                 if send_to_discord(message=msg, title=title, priority="urgent"):
@@ -357,7 +357,7 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
                     alerts_sent += 1
         else:
             if state.get("spot_alerted_ts") is not None:
-                log.info(f"Spot normalized (${spot:,.0f} > ${SPOT_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
+                log.info(f"Spot normalized (${spot:,.0f} >= ${SPOT_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
                 state["spot_alerted_ts"] = None
 
     # Record last prices
@@ -410,7 +410,7 @@ def main() -> int:
     log.info("=" * 60)
     log.info(" 🚆 Train Manager 24/7 Live Radar - abhijaysinghlimited")
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
-    log.info(f" Thresholds: Fuel <= ${FUEL_BUY_THRESHOLD:,.0f} | Spot <= ${SPOT_BUY_THRESHOLD:,.0f}")
+    log.info(f" Thresholds: Fuel < ${FUEL_BUY_THRESHOLD:,.0f} | Spot < ${SPOT_BUY_THRESHOLD:,.0f}")
     log.info("=" * 60)
 
     # 1. Login to trainmanager.cc
