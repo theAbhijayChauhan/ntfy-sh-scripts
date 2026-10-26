@@ -1,7 +1,7 @@
 {
-  "last_processed_date": null,
-  "last_run_status": null,
-  "last_scheduled_fuel": 0,
-  "last_scheduled_spot": 0,
-  "last_skipped_past": 0
+  "fuel_alerted_ts": null,
+  "spot_alerted_ts": null,
+  "last_run_ts": null,
+  "last_fuel_price": null,
+  "last_spot_price": null
 }

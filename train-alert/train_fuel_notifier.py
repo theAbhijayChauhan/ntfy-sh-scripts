@@ -1,34 +1,28 @@
 """
 ============================================================
- 🚆 Train Manager - Daily Fuel & Spot Price Tracker
+ 🚆 Train Manager - 24/7 Live Fuel & Spot Market Tracker
  🏢 Company: abhijaysinghlimited
- 🎯 Source: https://mgtools.cloud/games/train
- 🎯 API:    https://api.mgtools.cloud/v1/fuel-price/train
+ 🎯 Source: https://trainmanager.cc/ (Official Game Web Client)
  🔔 Discord Webhook (via discord_notifier.py)
 ============================================================
 
-Architecture
-------------
-This script is run ONCE per day (cron 06:00–07:00 IST, retries
-every 10 min until success). It does three things:
-
-  1. Fetch today's 24-slot fuel/spot schedule from mgtools API.
-  2. Send a morning briefing to Discord (immediate webhook)
-     listing the top-4 cheapest fuel + top-4 cheapest spot times.
-  3. Write scheduled_alerts.json with the 8 future-time alerts.
-
-A SEPARATE workflow (`train_alert_poll.yml`) polls every 5 min,
-loads scheduled_alerts.json, and fires a Discord webhook at the
-exact scheduled minute of each cheapest-price slot. This is the
-"Option B: poll-and-fire" pattern — fully free on GitHub Actions,
-no bot account, no scheduled-delivery server needed.
+✨ Features
+1. ENABLED switch     — set ENABLED = False to mute everything.
+2. 24/7 Live Radar    — runs every 15 minutes to check real in-game prices.
+3. Direct Game Auth   — logs into trainmanager.cc using game credentials.
+4. Emergency Alerts (silent unless in range):
+     • Fuel  <= $2,400 / 1,000 L    →  BUY FUEL QUICKLY
+     • Spot  <= $800   / 1,000 kWh  →  BUY SPOT POWER QUICKLY
+5. Cooldown dedup     — alerts once per price dip, prevents repetitive spam.
+6. Diagnostic mode    — run with --debug for verbose logging.
+7. Test mode          — run with --test-notify to verify Discord delivery.
 
 Usage
 -----
-  python train_fuel_notifier.py                 # normal daily run
-  python train_fuel_notifier.py --force         # re-run even if done today
-  python train_fuel_notifier.py --debug         # verbose logging
-  python train_fuel_notifier.py --test-notify   # test Discord webhook
+  python train_fuel_notifier.py                # normal 15-min radar check
+  python train_fuel_notifier.py --test-notify  # send a test push to Discord
+  python train_fuel_notifier.py --debug        # verbose logging
+  python train_fuel_notifier.py --force        # ignore cooldown and check
 ============================================================
 """
 
@@ -38,6 +32,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any, Optional
@@ -46,7 +41,6 @@ import requests
 from zoneinfo import ZoneInfo
 
 # Add the script's own dir to path so we can import discord_notifier
-# (whether it lives in this folder or one level up at repo root).
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(HERE)
 for p in (HERE, PARENT):
@@ -60,35 +54,47 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 # ============================================================
-#  MASTER TOGGLE
+#  MASTER SWITCH
 # ============================================================
 ENABLED = True
 
 # ============================================================
 #  CONFIGURATION
 # ============================================================
-NTFY_TOPIC = "abhijaysinghlimited-train-fuel-alert"  # kept for backward-compat
 TIMEZONE_NAME = "Asia/Kolkata"
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
 
 STATE_FILE = os.path.join(HERE, "train_state.json")
-SCHEDULED_ALERTS_FILE = os.path.join(HERE, "scheduled_alerts.json")
 LOG_FILE = os.path.join(HERE, "train_notifier.log")
 
-API_URL = "https://api.mgtools.cloud/v1/fuel-price/train"
-API_HEADERS = {
-    "Content-Type": "application/json",
+# Credentials — prefer env vars, fall back to defaults (same as Energy Manager).
+TM_EMAIL = os.getenv("TM_EMAIL") or os.getenv("EM_EMAIL", "abhijaychauhan98@duck.com")
+TM_PASSWORD = os.getenv("TM_PASSWORD") or os.getenv("EM_PASSWORD", "alok@singh")
+
+# --- Strict Emergency Buy Thresholds ---
+# In Train Manager:
+# • Fuel normal range is $2,000 - $7,000+. Lowest dips hit <= $2,400.
+# • Spot normal range is $600 - $1,600+. Lowest dips hit <= $800.
+FUEL_BUY_THRESHOLD = 2400.0   # Alert when Fuel <= $2,400 / 1,000 L
+SPOT_BUY_THRESHOLD = 800.0    # Alert when Spot <= $800 / 1,000 kWh
+
+# Don't re-alert the same commodity within this window while it stays low.
+ALERT_COOLDOWN_SECONDS = 2 * 3600  # 2 hours
+
+# API endpoints for Train Manager web client
+BASE_URL = "https://trainmanager.cc"
+LOGIN_URL = f"{BASE_URL}/weblogin/signin.php"
+FUEL_URL = f"{BASE_URL}/fuel.php"
+SPOT_URL = f"{BASE_URL}/fuel-spot.php?target=spot"
+
+HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
 }
-
-# Briefing window (24h IST). The morning briefing is sent inside
-# this window. Outside the window, only scheduling runs. --force
-# or --briefing bypass.
-BRIEFING_START = (6, 0)   # 06:00
-BRIEFING_END = (7, 0)     # 07:00
 
 # ============================================================
 #  LOGGING
@@ -109,21 +115,23 @@ log = logging.getLogger("train")
 #  STATE PERSISTENCE
 # ============================================================
 DEFAULT_STATE: dict[str, Any] = {
-    "last_processed_date": None,
-    "last_briefing_date": None,
-    "last_run_status": None,
-    "last_scheduled_fuel": 0,
-    "last_scheduled_spot": 0,
-    "last_skipped_past": 0,
+    "fuel_alerted_ts": None,
+    "spot_alerted_ts": None,
+    "last_run_ts": None,
+    "last_fuel_price": None,
+    "last_spot_price": None,
 }
 
 
 def load_state() -> dict:
+    """Load persistent alert state, merging with defaults for forward-compat."""
     state = dict(DEFAULT_STATE)
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                state.update(json.load(f))
+                data = json.load(f)
+            if isinstance(data, dict):
+                state.update(data)
         except Exception as e:
             log.warning(f"State file unreadable ({e}); using defaults.")
     return state
@@ -141,269 +149,249 @@ def save_state(state: dict) -> None:
 
 
 # ============================================================
-#  SCHEDULED-ALERTS FILE (for the poll-and-fire workflow)
+#  AUTH (Direct login to trainmanager.cc)
 # ============================================================
-def write_scheduled_alerts(top_4_fuel: list, top_4_spot: list, now: datetime.datetime) -> None:
-    """Write the 8 future-time alerts to scheduled_alerts.json.
+def create_authenticated_session(retries: int = 3, delay: int = 5) -> Optional[requests.Session]:
+    """Log in to trainmanager.cc and verify session cookies."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-    The poll-and-fire workflow reads this file every 5 minutes and
-    fires a Discord webhook when now >= scheduled_ts for any unfired
-    alert. We mark alerts whose time has already passed as `fired=True`
-    so the poller skips them.
-    """
-    today_str = now.strftime("%Y-%m-%d")
-    now_ts = int(now.timestamp())
-
-    alerts: list[dict] = []
-
-    medals = ["🥇 #1 Lowest Today!", "🥈 #2 Lowest Today!", "🥉 #3 Lowest Today!", "4️⃣ #4 Lowest Today!"]
-    for rank, item in enumerate(top_4_fuel, 1):
-        slot_dt = get_slot_datetime(item["time"], now)
-        if slot_dt is None:
-            continue
-        slot_ts = int(slot_dt.timestamp())
-        alerts.append({
-            "id": f"fuel-{rank}",
-            "type": "fuel",
-            "rank": rank,
-            "time_24h": clean_time(item["time"]),
-            "time_12h": to_12h(item["time"]),
-            "scheduled_ts": slot_ts,
-            "price": item["fuel"],
-            "other_price": item["spot"],
-            "medal": medals[rank - 1] if rank <= len(medals) else f"#{rank}",
-            "fired": slot_ts <= now_ts,  # auto-mark past slots as fired
-            "fired_ts": slot_ts if slot_ts <= now_ts else None,
-        })
-
-    for rank, item in enumerate(top_4_spot, 1):
-        slot_dt = get_slot_datetime(item["time"], now)
-        if slot_dt is None:
-            continue
-        slot_ts = int(slot_dt.timestamp())
-        alerts.append({
-            "id": f"spot-{rank}",
-            "type": "spot",
-            "rank": rank,
-            "time_24h": clean_time(item["time"]),
-            "time_12h": to_12h(item["time"]),
-            "scheduled_ts": slot_ts,
-            "price": item["spot"],
-            "other_price": item["fuel"],
-            "medal": medals[rank - 1] if rank <= len(medals) else f"#{rank}",
-            "fired": slot_ts <= now_ts,
-            "fired_ts": slot_ts if slot_ts <= now_ts else None,
-        })
-
-    state = {
-        "date": today_str,
-        "generated_at": now_ts,
-        "alert_count": len(alerts),
-        "alerts": alerts,
+    login_headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{BASE_URL}/",
+        "Origin": BASE_URL,
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     }
-
-    tmp = SCHEDULED_ALERTS_FILE + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, SCHEDULED_ALERTS_FILE)
-        log.info(f"Wrote {len(alerts)} scheduled alerts to {SCHEDULED_ALERTS_FILE}")
-    except Exception as e:
-        log.error(f"Could not write scheduled alerts: {e}")
-
-
-# ============================================================
-#  TIME HELPERS
-# ============================================================
-def in_briefing_window(now: datetime.datetime) -> bool:
-    mins = now.hour * 60 + now.minute
-    start = BRIEFING_START[0] * 60 + BRIEFING_START[1]
-    end = BRIEFING_END[0] * 60 + BRIEFING_END[1]
-    return start <= mins <= end
-
-
-def clean_time(time_str: str) -> str:
-    return (time_str or "").replace("->", "").strip()
-
-
-def to_12h(time_str: str) -> str:
-    is_current = "->" in (time_str or "")
-    cleaned = clean_time(time_str)
-    if ":" in cleaned:
-        parts = cleaned.split(":")
-        hh = parts[0].zfill(2)
-        mm = parts[1].zfill(2)
-        cleaned = f"{hh}:{mm}"
-    try:
-        dt = datetime.datetime.strptime(cleaned, "%H:%M")
-    except ValueError as e:
-        log.warning(f"Could not parse time {time_str!r}: {e}; falling back to raw.")
-        return cleaned
-    formatted = dt.strftime("%I:%M %p")
-    return f"{formatted} ⚡[NOW]" if is_current else formatted
-
-
-def get_slot_datetime(time_str: str, now: datetime.datetime) -> Optional[datetime.datetime]:
-    cleaned = clean_time(time_str)
-    if ":" not in cleaned:
-        return None
-    try:
-        hh, mm = cleaned.split(":")[0], cleaned.split(":")[1]
-        return now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-    except (ValueError, IndexError) as e:
-        log.warning(f"Bad slot time {time_str!r}: {e}")
-        return None
-
-
-def _to_number(v: Any) -> Optional[float]:
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return float(v)
-    if isinstance(v, str):
-        cleaned = v.replace("$", "").replace(",", "").strip()
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
-    return None
-
-
-def _fmt_money(v: Any) -> str:
-    n = _to_number(v)
-    if n is None:
-        return "N/A"
-    return f"${n:,.0f}"
-
-
-# ============================================================
-#  API
-# ============================================================
-def fetch_train_prices(timezone_name: str = TIMEZONE_NAME, retries: int = 5, delay: int = 5) -> list:
-    payload = {"timezone": timezone_name}
-    last_err: Optional[Exception] = None
+    payload = {"mail": TM_EMAIL, "pass": TM_PASSWORD, "remember": "1"}
 
     for attempt in range(1, retries + 1):
         try:
-            response = requests.post(API_URL, json=payload, headers=API_HEADERS, timeout=15)
+            res = session.post(LOGIN_URL, data=payload, headers=login_headers, timeout=15)
+            body_lower = res.text.lower()
+
             log.debug(
-                f"Fetch attempt {attempt}/{retries}: status={response.status_code} "
-                f"body[:300]={response.text[:300]!r}"
+                f"Login attempt {attempt}/{retries}: status={res.status_code} "
+                f"cookies={dict(session.cookies)} body[:200]={res.text[:200]!r}"
             )
-            response.raise_for_status()
-            result = response.json()
 
-            if isinstance(result, list):
-                data = result
-            elif isinstance(result, dict):
-                data = result.get("data") or result.get("schedule") or result.get("slots") or []
-            else:
-                data = []
+            # Hard-fail markers
+            failure_markers = [
+                "incorrect", "invalid", "wrong password", "login failed",
+                "unauthorized", "error", "access denied",
+            ]
+            if any(m in body_lower for m in failure_markers) and "location" not in body_lower:
+                log.error(f"Login attempt {attempt} rejected: {res.text[:300]!r}")
+                time.sleep(delay)
+                continue
 
-            if data:
-                return data
-            log.warning(f"Fetch attempt {attempt}: empty data array.")
+            # Success criteria: 200/302 status + game cookies set
+            if res.status_code in (200, 302) and session.cookies:
+                cookie_names = {c.name.lower() for c in session.cookies}
+                has_auth = any(
+                    n in cookie_names
+                    for n in ("trainmanager_cf_game", "phpsessid", "session", "auth")
+                )
+                if has_auth or "top.location" in body_lower:
+                    log.info(f"Login OK (attempt {attempt}, cookies: {list(cookie_names)}).")
+                    return session
+
+            log.warning(f"Login attempt {attempt}: status={res.status_code}, cookies={dict(session.cookies)}")
         except requests.RequestException as e:
-            last_err = e
-            log.error(f"Fetch attempt {attempt}/{retries} network error: {e}")
-        except ValueError as e:
-            last_err = e
-            log.error(f"Fetch attempt {attempt}/{retries} JSON parse error: {e}")
+            log.error(f"Login attempt {attempt} network error: {e}")
         time.sleep(delay)
 
-    if last_err:
-        raise last_err
-    return []
-
-
-def normalize_slots(raw_slots: list) -> list[dict]:
-    out: list[dict] = []
-    for raw in raw_slots:
-        if not isinstance(raw, dict):
-            continue
-        fuel = _to_number(raw.get("fuel"))
-        spot = _to_number(raw.get("spot"))
-        time_str = raw.get("time") or raw.get("slot") or raw.get("hour")
-        day = raw.get("day")
-        if time_str is None or (fuel is None and spot is None):
-            log.debug(f"Skipping slot (missing fields): {raw}")
-            continue
-        out.append({
-            "time": str(time_str),
-            "fuel": fuel,
-            "spot": spot,
-            "day": str(day) if day is not None else None,
-        })
-    return out
+    log.error("All login attempts to trainmanager.cc failed.")
+    return None
 
 
 # ============================================================
-#  DISCORD HELPERS
+#  PRICE EXTRACTION
+# ============================================================
+def fetch_live_train_prices(session: requests.Session, retries: int = 3, delay: int = 3) -> dict:
+    """Fetch live Fuel and Spot prices directly from in-game pages."""
+    result: dict[str, Any] = {}
+
+    # 1. Fetch Fuel Page
+    for attempt in range(1, retries + 1):
+        try:
+            r_fuel = session.get(FUEL_URL, timeout=15)
+            if r_fuel.status_code == 200:
+                # Primary regex: <span ...>$2,400/1,000 L</span>
+                m_fuel = re.search(r'\$([\d,]+)\s*/\s*1,000\s*L', r_fuel.text, re.I)
+                if not m_fuel:
+                    m_fuel = re.search(r'var\s+fuelPrice\s*=\s*([\d\.]+);', r_fuel.text)
+                    if m_fuel:
+                        result["fuel"] = float(m_fuel.group(1)) * 1000
+                else:
+                    result["fuel"] = float(m_fuel.group(1).replace(",", ""))
+
+                # Extract 20-slot chart history
+                m_hist = re.search(r'fuel_startFuelChart\(\s*\[([0-9,\s]+)\]', r_fuel.text)
+                if m_hist:
+                    hist_vals = [int(x.strip()) for x in m_hist.group(1).split(",") if x.strip()]
+                    result["fuel_history"] = hist_vals
+                    result["fuel_min"] = min(hist_vals)
+                    result["fuel_max"] = max(hist_vals)
+                break
+            log.warning(f"Fuel page HTTP {r_fuel.status_code} (attempt {attempt})")
+        except requests.RequestException as e:
+            log.error(f"Fuel fetch error (attempt {attempt}): {e}")
+        time.sleep(delay)
+
+    # 2. Fetch Spot Page
+    for attempt in range(1, retries + 1):
+        try:
+            r_spot = session.get(SPOT_URL, timeout=15)
+            if r_spot.status_code == 200:
+                # Primary regex: <span ...>$800/1,000 kWh</span>
+                m_spot = re.search(r'\$([\d,]+)\s*/\s*1,000\s*kWh', r_spot.text, re.I)
+                if not m_spot:
+                    m_spot = re.search(r'var\s+fuelPrice\s*=\s*([\d\.]+);', r_spot.text)
+                    if m_spot:
+                        result["spot"] = float(m_spot.group(1)) * 1000
+                else:
+                    result["spot"] = float(m_spot.group(1).replace(",", ""))
+
+                # Extract 20-slot chart history
+                m_spot_hist = re.search(r'fuel_startFuelChart\(\s*\[([0-9,\s]+)\]', r_spot.text)
+                if m_spot_hist:
+                    hist_vals = [int(x.strip()) for x in m_spot_hist.group(1).split(",") if x.strip()]
+                    result["spot_history"] = hist_vals
+                    result["spot_min"] = min(hist_vals)
+                    result["spot_max"] = max(hist_vals)
+                break
+            log.warning(f"Spot page HTTP {r_spot.status_code} (attempt {attempt})")
+        except requests.RequestException as e:
+            log.error(f"Spot fetch error (attempt {attempt}): {e}")
+        time.sleep(delay)
+
+    return result
+
+
+# ============================================================
+#  COOLDOWN & EMERGENCY CHECKS
+# ============================================================
+def _within_cooldown(state: dict, key: str) -> bool:
+    ts = state.get(f"{key}_alerted_ts")
+    if not ts:
+        return False
+    return (time.time() - ts) < ALERT_COOLDOWN_SECONDS
+
+
+def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str) -> tuple[dict, int]:
+    """Check fuel and spot against thresholds and alert if cheap."""
+    alerts_sent = 0
+
+    fuel = prices.get("fuel")
+    spot = prices.get("spot")
+
+    # Log current market summary
+    fuel_min = prices.get("fuel_min", "N/A")
+    fuel_max = prices.get("fuel_max", "N/A")
+    spot_min = prices.get("spot_min", "N/A")
+    spot_max = prices.get("spot_max", "N/A")
+
+    log.info(
+        f"Live In-Game Prices: "
+        f"Fuel=${fuel:,.0f} (recent min=${fuel_min}, max=${fuel_max}), "
+        f"Spot=${spot:,.0f} (recent min=${spot_min}, max=${spot_max})"
+    )
+
+    # 1. FUEL CHECK
+    if fuel is not None:
+        if fuel <= FUEL_BUY_THRESHOLD:
+            if _within_cooldown(state, "fuel"):
+                log.info(f"Fuel: triggered (${fuel:,.0f}) but in cooldown. Skipping duplicate.")
+            else:
+                log.info(f"🚨 CRITICAL: Fuel price ${fuel:,.0f} <= ${FUEL_BUY_THRESHOLD:,.0f} threshold!")
+                title = f"BUY FUEL QUICKLY: ${fuel:,.0f} at {current_time_12h}"
+                msg = (
+                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                    f"       ⛽ BUY FUEL QUICKLY • ROCK-BOTTOM NOW!\n"
+                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                    f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
+                    f"💰 **Fuel Price:** **${fuel:,.0f}** / 1,000 L\n"
+                    f"🎯 **Your Target:** <= ${FUEL_BUY_THRESHOLD:,.0f}\n"
+                    f"⚡ **Spot Power:** ${spot:,.0f} / 1,000 kWh\n"
+                    f"📊 **Recent Range:** ${fuel_min} – ${fuel_max}\n"
+                    f"🏢 **Company:** abhijaysinghlimited\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                    f"Fuel price is at a rock-bottom rate in **Train Manager**!\n"
+                    f"👉 Open **Train Manager** and fill your tanks now!"
+                )
+                if send_to_discord(message=msg, title=title, priority="urgent"):
+                    state["fuel_alerted_ts"] = time.time()
+                    alerts_sent += 1
+        else:
+            # Normalized — clear alert marker so the NEXT dip alerts fresh
+            if state.get("fuel_alerted_ts") is not None:
+                log.info(f"Fuel normalized (${fuel:,.0f} > ${FUEL_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
+                state["fuel_alerted_ts"] = None
+
+    # 2. SPOT CHECK
+    if spot is not None:
+        if spot <= SPOT_BUY_THRESHOLD:
+            if _within_cooldown(state, "spot"):
+                log.info(f"Spot: triggered (${spot:,.0f}) but in cooldown. Skipping duplicate.")
+            else:
+                log.info(f"🚨 CRITICAL: Spot price ${spot:,.0f} <= ${SPOT_BUY_THRESHOLD:,.0f} threshold!")
+                title = f"BUY SPOT QUICKLY: ${spot:,.0f} at {current_time_12h}"
+                msg = (
+                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                    f"       ⚡ BUY SPOT POWER QUICKLY!\n"
+                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                    f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
+                    f"⚡ **Spot Price:** **${spot:,.0f}** / 1,000 kWh\n"
+                    f"🎯 **Your Target:** <= ${SPOT_BUY_THRESHOLD:,.0f}\n"
+                    f"⛽ **Fuel Price:** ${fuel:,.0f} / 1,000 L\n"
+                    f"📊 **Recent Range:** ${spot_min} – ${spot_max}\n"
+                    f"🏢 **Company:** abhijaysinghlimited\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
+                    f"Spot electricity is at its cheapest rate in **Train Manager**!\n"
+                    f"👉 Open **Train Manager** and lock your spot power now!"
+                )
+                if send_to_discord(message=msg, title=title, priority="urgent"):
+                    state["spot_alerted_ts"] = time.time()
+                    alerts_sent += 1
+        else:
+            if state.get("spot_alerted_ts") is not None:
+                log.info(f"Spot normalized (${spot:,.0f} > ${SPOT_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
+                state["spot_alerted_ts"] = None
+
+    # Record last prices
+    state["last_fuel_price"] = fuel
+    state["last_spot_price"] = spot
+    state["last_run_ts"] = time.time()
+
+    return state, alerts_sent
+
+
+# ============================================================
+#  SELF-TEST
 # ============================================================
 def send_test_notification() -> bool:
-    log.info("Sending TEST notification to Discord webhook...")
+    """Send a test embed to Discord channel to verify webhook."""
+    log.info("Sending TEST notification to Discord...")
     return send_to_discord(
         message=(
-            "✅ **Test from Train Manager notifier.**\n\n"
-            "If you see this in Discord, your webhook + script work.\n\n"
-            "Scheduled price-time alerts will appear in RED when their "
-            "minute arrives (handled by the poll-and-fire workflow)."
+            "✅ **Train Manager Live Radar TEST**\n\n"
+            "If you see this in Discord, your Train Manager live tracker is fully connected!\n\n"
+            f"🎯 Active Thresholds:\n"
+            f"• ⛽ Fuel: <= ${FUEL_BUY_THRESHOLD:,.0f} / 1,000 L\n"
+            f"• ⚡ Spot: <= ${SPOT_BUY_THRESHOLD:,.0f} / 1,000 kWh\n\n"
+            "Checks run 24/7 every 15 minutes straight from **trainmanager.cc**."
         ),
-        title="Train Manager: TEST",
+        title="Train Manager: Live Radar TEST",
         priority="default",
     )
 
 
 # ============================================================
-#  BRIEFING
-# ============================================================
-def build_morning_briefing(top_4_fuel: list, top_4_spot: list, now: datetime.datetime) -> str:
-    date_str = now.strftime("%A, %d %B %Y")
-    current_time_12h = now.strftime("%I:%M %p")
-    medals = ["🥇", "🥈", "🥉", "4️⃣"]
-    badges_fuel = ["🟢 BEST DEAL", "⭐ GREAT PRICE", "💰 LOW DROP", "📉 GOOD TIME"]
-    badges_spot = ["🟢 BEST SPOT", "⭐ GREAT RATE", "⚡ LOW PEAK", "📉 GOOD SPOT"]
-
-    lines = [
-        "🚆 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚆",
-        "       TRAIN MANAGER • DAILY BRIEFING",
-        "             abhijaysinghlimited",
-        "🚆 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚆",
-        f"📅 **Date:** {date_str} | ⏰ **Time:** {current_time_12h} IST",
-        "🎯 **Radar:** 24-Hour Automated Price Forecaster",
-        "",
-        "⛽ ━━━ 🏆 TOP 4 LOWEST FUEL DROPS ━━━ ⛽",
-    ]
-
-    for i, item in enumerate(top_4_fuel):
-        m = medals[i] if i < len(medals) else f"#{i+1}"
-        b = badges_fuel[i] if i < len(badges_fuel) else "🏷️ DISCOUNT"
-        lines.append(
-            f"{m} **{to_12h(item['time'])}** ➜ **{_fmt_money(item['fuel'])}** "
-            f"*(Spot: {_fmt_money(item['spot'])})* {b}"
-        )
-
-    lines.append("")
-    lines.append("⚡ ━━━ ⚡ TOP 4 LOWEST SPOT DROPS ━━━ ⚡")
-    for i, item in enumerate(top_4_spot):
-        m = medals[i] if i < len(medals) else f"#{i+1}"
-        b = badges_spot[i] if i < len(badges_spot) else "🏷️ DISCOUNT"
-        lines.append(
-            f"{m} **{to_12h(item['time'])}** ➜ **{_fmt_money(item['spot'])}** "
-            f"*(Fuel: {_fmt_money(item['fuel'])})* {b}"
-        )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🔔 **AUTO-ALERTS QUEUED:**")
-    lines.append("📱 The poll-and-fire workflow will buzz this channel at the exact minute of each cheapest slot above!")
-    lines.append("🎮 *Open Train Manager when the red alert lands!*")
-    return "\n".join(lines)
-
-
-# ============================================================
-#  MAIN
+#  MAIN RUNNER
 # ============================================================
 def main() -> int:
-    # --- Special: self-test ---
     if "--test-notify" in sys.argv:
         ok = send_test_notification()
         return 0 if ok else 1
@@ -412,119 +400,59 @@ def main() -> int:
         log.info("Train alerts are DISABLED (ENABLED=False). Exiting.")
         return 0
 
+    if not TM_EMAIL or not TM_PASSWORD:
+        log.error("TM_EMAIL or TM_PASSWORD is empty. Set env vars.")
+        return 2
+
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
-    today_str = now.strftime("%Y-%m-%d")
-    today_day_str = str(now.day)
-
-    state = load_state()
-
-    # --- Deduplication check ---
-    already_briefed = state.get("last_briefing_date") == today_str
-    if already_briefed and "--force" not in sys.argv and "--briefing" not in sys.argv:
-        log.info(
-            f"Train Manager briefing for today ({today_str}) already sent. Skipping. (Use --force.)"
-        )
-        return 0
-
-    send_briefing = (
-        "--force" in sys.argv
-        or "--briefing" in sys.argv
-        or not already_briefed
-    )
 
     log.info("=" * 60)
-    log.info(" 🚆 Train Manager Notifier - abhijaysinghlimited")
+    log.info(" 🚆 Train Manager 24/7 Live Radar - abhijaysinghlimited")
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
-    log.info(f" Mode : {'Briefing + Scheduler' if send_briefing else 'Scheduler only'}")
+    log.info(f" Thresholds: Fuel <= ${FUEL_BUY_THRESHOLD:,.0f} | Spot <= ${SPOT_BUY_THRESHOLD:,.0f}")
     log.info("=" * 60)
 
-    # --- Fetch schedule ---
-    log.info(f"Fetching schedule from {API_URL} ...")
-    try:
-        raw_slots = fetch_train_prices(TIMEZONE_NAME)
-    except Exception as e:
-        log.error(f"Failed to fetch schedule: {e}")
+    # 1. Login to trainmanager.cc
+    log.info(f"Logging in to {BASE_URL} as {TM_EMAIL}...")
+    session = create_authenticated_session()
+    if not session:
+        log.error("Login to trainmanager.cc failed.")
         send_to_discord(
             message=(
-                "⚠️ Train Manager notifier could NOT fetch the daily schedule.\n\n"
-                f"Error: `{e!s}`\n\n"
-                "Likely causes:\n"
-                "• mgtools.cloud API is down or under maintenance\n"
-                "• Network / DNS problem\n"
-                "• API response shape changed (run with --debug)\n\n"
-                "No alerts were scheduled for today."
+                "⚠️ Train Manager notifier could NOT log in to trainmanager.cc.\n\n"
+                f"Account: `{TM_EMAIL}`\n"
+                "Please verify your email and password."
             ),
-            title="Train Manager: API FETCH FAILED",
+            title="Train Manager: LOGIN FAILED",
             priority="high",
         )
         return 3
 
-    log.info(f"Fetched {len(raw_slots)} raw slots.")
-    if not raw_slots:
-        log.error("API returned zero slots. Notifying & exiting.")
+    # 2. Fetch live in-game prices
+    log.info("Fetching real in-game prices from fuel.php & fuel-spot.php...")
+    prices = fetch_live_train_prices(session)
+    if "fuel" not in prices and "spot" not in prices:
+        log.error("Could not parse fuel or spot prices from trainmanager.cc.")
         send_to_discord(
             message=(
-                "⚠️ Train Manager API returned an empty schedule for today.\n"
-                "Either mgtools.cloud is broken or the API contract changed.\n"
-                "Run with --debug and inspect train_notifier.log."
+                "⚠️ Train Manager could not read fuel/spot prices from trainmanager.cc.\n"
+                "Game layout may have changed."
             ),
-            title="Train Manager: EMPTY SCHEDULE",
+            title="Train Manager: PARSE ERROR",
             priority="high",
         )
         return 4
 
-    all_slots = normalize_slots(raw_slots)
-    today_slots = [s for s in all_slots if s.get("day") == today_day_str]
-    if not today_slots:
-        today_slots = all_slots
-        log.warning("No `day` field matched today; using all returned slots.")
-    log.info(f"Working with {len(today_slots)} slots for today.")
-
-    by_fuel = sorted(
-        today_slots,
-        key=lambda x: (
-            x["fuel"] if x["fuel"] is not None else float("inf"),
-            clean_time(x["time"]),
-        ),
-    )
-    by_spot = sorted(
-        today_slots,
-        key=lambda x: (
-            x["spot"] if x["spot"] is not None else float("inf"),
-            clean_time(x["time"]),
-        ),
-    )
-    top_4_fuel = by_fuel[:4]
-    top_4_spot = by_spot[:4]
-
-    # --- Morning briefing ---
-    if send_briefing:
-        briefing_msg = build_morning_briefing(top_4_fuel, top_4_spot, now)
-        log.info("Sending morning briefing to Discord...")
-        briefing_sent = send_to_discord(
-            message=briefing_msg,
-            title=f"Train Manager: Daily Fuel & Spot Briefing ({current_time_12h})",
-            priority="default",
-        )
-        if briefing_sent:
-            state["last_briefing_date"] = today_str
-        else:
-            log.warning("Briefing failed to send — continuing to scheduling anyway.")
-    else:
-        log.info(f"Briefing already sent today ({today_str}). Skipping briefing.")
-
-    # --- Write scheduled_alerts.json (the poll-and-fire workflow reads this) ---
-    write_scheduled_alerts(top_4_fuel, top_4_spot, now)
-
-    # --- Save state AFTER everything (so a crash doesn't lose work) ---
-    state["last_processed_date"] = today_str
-    state["last_run_status"] = "ok"
-    state["last_scheduled_fuel"] = len(top_4_fuel)
-    state["last_scheduled_spot"] = len(top_4_spot)
+    # 3. Check thresholds & alert
+    state = load_state()
+    state, alerts_sent = check_emergency_conditions(prices, state, current_time_12h)
     save_state(state)
 
-    log.info("Run complete.")
+    if alerts_sent == 0:
+        log.info("Prices outside buy range or in cooldown. Strictly silent.")
+
+    log.info(f"Run complete. Alerts fired: {alerts_sent}.")
     return 0
 
 

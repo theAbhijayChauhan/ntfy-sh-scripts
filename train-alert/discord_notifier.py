@@ -67,7 +67,8 @@ def send_to_discord(
     `at_timestamp` (if in the future) triggers a fallback warning since
     Discord webhooks cannot schedule future delivery.
     """
-    if not WEBHOOK_URL:
+    webhook = os.getenv("DISCORD_WEBHOOK_URL") or WEBHOOK_URL
+    if not webhook:
         log.error("DISCORD_WEBHOOK_URL not set.")
         return False
 
@@ -86,20 +87,20 @@ def send_to_discord(
     description = message if len(message) <= 4000 else message[:4000] + " …"
 
     payload = {
-        "username": "abhijaysinghlimited alerts",
+        "username": "🚆 Train Manager Alerts",
         "embeds": [
             {
                 "title": title,
                 "description": description,
                 "color": color,
-                "footer": {"text": "abhijaysinghlimited alerts"},
+                "footer": {"text": "abhijaysinghlimited • Train Manager"},
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
         ],
     }
 
     try:
-        r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
+        r = requests.post(webhook, json=payload, timeout=15)
 
         # Discord webhooks return 204 No Content on success.
         if r.status_code == 204:
@@ -114,7 +115,7 @@ def send_to_discord(
                 retry_after = 5.0
             log.warning(f"Discord rate-limited; retrying in {retry_after:.1f}s.")
             time.sleep(retry_after)
-            r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
+            r = requests.post(webhook, json=payload, timeout=15)
             if r.status_code == 204:
                 log.info(f"Discord OK (after retry) → {title}")
                 return True
