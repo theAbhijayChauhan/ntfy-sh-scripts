@@ -346,16 +346,10 @@ def check_emergency_conditions(market: dict, state: dict, current_time_12h: str)
                 continue
             title = f"{action} (${price:.2f})"
             msg = (
-                f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
-                f"          {emoji} {action}!\n"
-                f"🚨🚨🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨🚨🚨\n"
+                f"🚨 **{emoji} {action}!**\n"
+                f"💰 **Current Price:** **${price:.2f}** *(Target: {direction} ${threshold:.2f})*\n"
                 f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n"
-                f"💰 **Current Price:** **${price:.2f}** "
-                f"*(Target: {direction} ${threshold:.2f})*\n"
-                f"🏢 **Account:** `{EM_EMAIL}`\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-                f"{summary}\n"
+                f"🎯 **Action:** {summary}\n"
                 f"👉 Open **Energy Manager** and act now!"
             )
             if send_to_discord(message=msg, title=title, tags=tags, priority="urgent"):

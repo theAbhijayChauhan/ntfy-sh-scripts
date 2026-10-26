@@ -306,18 +306,10 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
                 log.info(f"🚨 CRITICAL: Fuel price ${fuel:,.0f} < ${FUEL_BUY_THRESHOLD:,.0f} threshold!")
                 title = f"BUY FUEL QUICKLY: ${fuel:,.0f} at {current_time_12h}"
                 msg = (
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-                    f"       ⛽ BUY FUEL QUICKLY • ROCK-BOTTOM NOW!\n"
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                    f"🚨 **⛽ BUY FUEL QUICKLY • ROCK-BOTTOM NOW!**\n"
+                    f"💰 **Fuel Price:** **${fuel:,.0f}** / 1,000 L *(Target: < ${FUEL_BUY_THRESHOLD:,.0f})*\n"
                     f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                    f"💰 **Fuel Price:** **${fuel:,.0f}** / 1,000 L\n"
-                    f"🎯 **Your Target:** < ${FUEL_BUY_THRESHOLD:,.0f}\n"
                     f"⚡ **Spot Power:** ${spot:,.0f} / 1,000 kWh\n"
-                    f"📊 **Recent Range:** ${fuel_min} – ${fuel_max}\n"
-                    f"🏢 **Company:** abhijaysinghlimited\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-                    f"Fuel price dropped below **$2,600** in **Train Manager**!\n"
                     f"👉 Open **Train Manager** and fill your tanks now!"
                 )
                 if send_to_discord(message=msg, title=title, priority="urgent"):
@@ -338,18 +330,10 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
                 log.info(f"🚨 CRITICAL: Spot price ${spot:,.0f} < ${SPOT_BUY_THRESHOLD:,.0f} threshold!")
                 title = f"BUY SPOT QUICKLY: ${spot:,.0f} at {current_time_12h}"
                 msg = (
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-                    f"       ⚡ BUY SPOT POWER QUICKLY!\n"
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━━━━━━ 🚨\n"
+                    f"🚨 **⚡ BUY SPOT POWER QUICKLY!**\n"
+                    f"⚡ **Spot Price:** **${spot:,.0f}** / 1,000 kWh *(Target: < ${SPOT_BUY_THRESHOLD:,.0f})*\n"
                     f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                    f"⚡ **Spot Price:** **${spot:,.0f}** / 1,000 kWh\n"
-                    f"🎯 **Your Target:** < ${SPOT_BUY_THRESHOLD:,.0f}\n"
                     f"⛽ **Fuel Price:** ${fuel:,.0f} / 1,000 L\n"
-                    f"📊 **Recent Range:** ${spot_min} – ${spot_max}\n"
-                    f"🏢 **Company:** abhijaysinghlimited\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 **IMMEDIATE ACTION REQUIRED:**\n"
-                    f"Spot electricity dropped below **$600** in **Train Manager**!\n"
                     f"👉 Open **Train Manager** and lock your spot power now!"
                 )
                 if send_to_discord(message=msg, title=title, priority="urgent"):
