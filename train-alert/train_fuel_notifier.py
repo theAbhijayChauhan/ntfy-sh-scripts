@@ -110,6 +110,7 @@ log = logging.getLogger("train")
 # ============================================================
 DEFAULT_STATE: dict[str, Any] = {
     "last_processed_date": None,
+    "last_briefing_date": None,
     "last_run_status": None,
     "last_scheduled_fuel": 0,
     "last_scheduled_spot": 0,
@@ -419,16 +420,17 @@ def main() -> int:
     state = load_state()
 
     # --- Deduplication check ---
-    if state.get("last_processed_date") == today_str and "--force" not in sys.argv:
+    already_briefed = state.get("last_briefing_date") == today_str
+    if already_briefed and "--force" not in sys.argv and "--briefing" not in sys.argv:
         log.info(
-            f"Train Manager for today ({today_str}) already processed. Skipping. (Use --force.)"
+            f"Train Manager briefing for today ({today_str}) already sent. Skipping. (Use --force.)"
         )
         return 0
 
     send_briefing = (
         "--force" in sys.argv
         or "--briefing" in sys.argv
-        or in_briefing_window(now)
+        or not already_briefed
     )
 
     log.info("=" * 60)
@@ -505,10 +507,12 @@ def main() -> int:
             title=f"Train Manager: Daily Fuel & Spot Briefing ({current_time_12h})",
             priority="default",
         )
-        if not briefing_sent:
+        if briefing_sent:
+            state["last_briefing_date"] = today_str
+        else:
             log.warning("Briefing failed to send — continuing to scheduling anyway.")
     else:
-        log.info(f"Outside briefing window. Skipping briefing.")
+        log.info(f"Briefing already sent today ({today_str}). Skipping briefing.")
 
     # --- Write scheduled_alerts.json (the poll-and-fire workflow reads this) ---
     write_scheduled_alerts(top_4_fuel, top_4_spot, now)

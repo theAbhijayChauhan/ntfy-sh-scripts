@@ -495,7 +495,7 @@ def main() -> int:
     should_send_briefing = (
         "--briefing" in sys.argv
         or "--force" in sys.argv
-        or (in_briefing_window(now) and state.get("last_briefing_date") != today_str)
+        or (state.get("last_briefing_date") != today_str)
     )
 
     log.info("=" * 60)
