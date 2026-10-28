@@ -11,8 +11,8 @@
 2. 24/7 Live Radar    — runs every 15 minutes to check real in-game prices.
 3. Direct Game Auth   — logs into trainmanager.cc using game credentials.
 4. Emergency Alerts (silent unless in range):
-     • Fuel  <= $2,400 / 1,000 L    →  BUY FUEL QUICKLY
-     • Spot  <= $800   / 1,000 kWh  →  BUY SPOT POWER QUICKLY
+     • Fuel  <= $2,800 / 1,000 L    →  BUY FUEL QUICKLY
+     • Spot  <= $600   / 1,000 kWh  →  BUY SPOT POWER QUICKLY
 5. Cooldown dedup     — alerts once per price dip, prevents repetitive spam.
 6. Diagnostic mode    — run with --debug for verbose logging.
 7. Test mode          — run with --test-notify to verify Discord delivery.
@@ -73,13 +73,13 @@ TM_PASSWORD = os.getenv("TM_PASSWORD") or os.getenv("EM_PASSWORD", "alok@singh")
 
 # --- Strict Emergency Buy Thresholds ---
 # User targets:
-# • Fuel <= $2,600 / 1,000 L
+# • Fuel <= $2,800 / 1,000 L
 # • Spot <= $600 / 1,000 kWh
-FUEL_BUY_THRESHOLD = 2600.0   # Alert when Fuel <= $2,600 / 1,000 L
+FUEL_BUY_THRESHOLD = 2800.0   # Alert when Fuel <= $2,800 / 1,000 L
 SPOT_BUY_THRESHOLD = 600.0    # Alert when Spot <= $600 / 1,000 kWh
 
 # Don't re-alert the same commodity within this window while it stays low.
-ALERT_COOLDOWN_SECONDS = 2 * 3600  # 2 hours
+ALERT_COOLDOWN_SECONDS = 30 * 60  # 30 minutes
 
 # API endpoints for Train Manager web client
 BASE_URL = "https://trainmanager.cc"
@@ -297,7 +297,7 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
         f"Spot=${spot:,.0f} (recent min=${spot_min}, max=${spot_max})"
     )
 
-    # 1. FUEL CHECK (Fuel <= $2,600)
+    # 1. FUEL CHECK (Fuel <= $2,800)
     if fuel is not None:
         if fuel <= FUEL_BUY_THRESHOLD:
             if _within_cooldown(state, "fuel"):
