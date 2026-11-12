@@ -40,6 +40,7 @@ def upsert_to_discord(
     priority: str = "default",
     message_id: Optional[str] = None,
     notify: bool = True,
+    content: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """Update or replace the single Train Manager status/alert message."""
     webhook = _get_webhook()
@@ -55,6 +56,7 @@ def upsert_to_discord(
         priority=priority,
         message_id=message_id,
         notify=notify,
+        content=content,
     )
 
 

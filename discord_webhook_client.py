@@ -21,9 +21,9 @@ PRIORITY_COLOR = {
     "default": 0x3498DB,  # blue
     "low": 0x95A5A6,      # gray
     "high": 0xF39C12,     # orange
-    "buy": 0x2ECC71,      # green
-    "sell": 0xE74C3C,     # red
-    "urgent": 0xE74C3C,   # red
+    "buy": 0x00FF7F,      # glowing neon green
+    "sell": 0xFF1744,     # glowing neon red
+    "urgent": 0xFF1744,   # glowing neon red
 }
 
 
@@ -112,14 +112,15 @@ def upsert_discord_message(
     priority: str = "default",
     message_id: Optional[str] = None,
     notify: bool = True,
+    content: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """Keep a single live message in Discord per channel.
 
     Returns (success, latest_message_id):
     - notify=True : deletes previous message (if known) and POSTs a new one
-                    so Discord triggers a push notification.
+                    with an @everyone ping so Discord triggers a mobile push.
     - notify=False: PATCHes previous message in place (silent, zero push),
-                    posting a fresh message only if none exists / 404.
+                    clearing any stale @everyone banner and posting only if none exists / 404.
     """
     if not webhook_url:
         log.error("Discord webhook URL not set.")
@@ -129,7 +130,7 @@ def upsert_discord_message(
 
     if not notify and message_id:
         patch_url = _build_message_url(webhook_url, message_id)
-        resp = _request_with_rate_limit("PATCH", patch_url, {"embeds": [embed]})
+        resp = _request_with_rate_limit("PATCH", patch_url, {"content": "", "embeds": [embed]})
         if resp is None:
             # Preserve message_id on transient network errors so next run retries PATCH.
             return False, message_id
@@ -145,9 +146,19 @@ def upsert_discord_message(
 
     if notify and message_id:
         _delete_message(webhook_url, message_id)
+        time.sleep(0.3)
 
     post_url = _build_post_url(webhook_url)
-    payload = {"username": username, "embeds": [embed]}
+    if notify:
+        ping_text = content if content is not None else f"@everyone 🚨 **{title}**"
+        payload = {
+            "username": username,
+            "content": ping_text,
+            "allowed_mentions": {"parse": ["everyone"]},
+            "embeds": [embed],
+        }
+    else:
+        payload = {"username": username, "embeds": [embed]}
     resp = _request_with_rate_limit("POST", post_url, payload)
     if resp is None:
         return False, None if notify else message_id

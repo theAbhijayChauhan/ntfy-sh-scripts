@@ -335,8 +335,8 @@ def _format_commodity_line(
     is_hit: bool,
 ) -> str:
     if is_hit:
-        badge = "🟩 **`BUY`**" if action == "BUY" else "🟥 **`SELL`**"
-        return f"  - {emoji} {label}: **${price:.2f}** {badge}"
+        badge = "✨ **`BUY NOW`**" if action == "BUY" else "🔥 **`SELL NOW`**"
+        return f"  - {emoji} **{label}:** **`${price:.2f}`** {badge}"
     return f"  - {emoji} {label}: **${price:.2f}** · `{op} ${threshold:.2f}`"
 
 
@@ -367,7 +367,7 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
     """Update the single Discord message in #energy-alerts.
 
     - If any commodity is in target range (NO cooldown): deletes old message and
-      POSTs a fresh green (BUY) or red (SELL) alert so your phone buzzes every time.
+      POSTs a fresh @everyone glowing alert (green BUY / red SELL) so your phone buzzes every time.
     - If all commodities are normal: silently PATCHes the single message with
       clean live prices (zero push notification).
     """
@@ -386,16 +386,31 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
     if triggered:
         if len(triggered) == 1:
             _, label, _, _, action, _, price = triggered[0]
-            title = f"🚨 {action} {label} (${price:.2f})"
+            summary = f"{action} {label.upper()} NOW • ${price:.2f}"
         else:
             summary = " & ".join(f"{t[4]} {t[1]} (${t[6]:.2f})" for t in triggered)
-            title = f"🚨 {summary}"
+
+        title = f"⚡ {summary}"
+        ping_content = f"@everyone 🚨 **{summary}** — open Energy Manager!"
+
+        diff_lines = []
+        for _, label, threshold, op, action, _, price in triggered:
+            prefix = "+" if action == "BUY" else "-"
+            diff_lines.append(
+                f"{prefix} >>> {action} {label.upper()} NOW: ${price:.2f} (Target {op} ${threshold:.2f}) <<<"
+            )
+        banner = "```diff\n" + "\n".join(diff_lines) + "\n```"
 
         has_sell = any(t[4] == "SELL" for t in triggered)
         priority = "sell" if has_sell else "buy"
 
         msg = "\n".join(
-            body_lines
+            [
+                banner,
+                "> 🔥 **Market target hit — open Energy Manager and act now!**",
+                "",
+            ]
+            + body_lines
             + [
                 "- **Status**",
                 f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST)",
@@ -407,6 +422,7 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
             priority=priority,
             message_id=state.get("last_message_id"),
             notify=True,
+            content=ping_content,
         )
         if ok:
             state["last_message_id"] = new_id
