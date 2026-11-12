@@ -1,7 +1,8 @@
 {
   "fuel_alerted_ts": null,
   "spot_alerted_ts": null,
-  "last_run_ts": null,
   "last_fuel_price": null,
-  "last_spot_price": null
+  "last_spot_price": null,
+  "last_run_ts": null,
+  "last_message_id": null
 }

@@ -1,6 +1,3 @@
 {
-  "oil_alerted_ts": null,
-  "coal_alerted_ts": null,
-  "hydrogen_alerted_ts": null,
-  "co2_alerted_ts": null
+  "last_message_id": null
 }

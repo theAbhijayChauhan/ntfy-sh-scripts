@@ -7,24 +7,26 @@
 ============================================================
 
 ✨ Features
-1. ENABLED switch — set ENABLED = False to mute everything.
-2. 24/7 Live Radar — runs every hour at :30 (e.g. 7:30, 8:30, 9:30...).
-3. Timing Safety — if triggered at :28 or :29, waits until :30:05 before fetching
+1. ENABLED switch   — set ENABLED = False to mute everything.
+2. 24/7 Live Radar  — runs every hour at :30 (e.g. 7:30, 8:30, 9:30...).
+3. Timing Safety    — if triggered at :28 or :29, waits until :30:05 before fetching
    so it never checks old prices before the game refreshes.
-4. Strict Emergency Thresholds (strictly silent unless breached):
+4. No Cooldown      — notifies EVERY time any commodity is in target range:
      • Oil       < $1.50   →  BUY OIL QUICKLY
      • Coal      < $1.50   →  BUY COAL QUICKLY
      • Hydrogen  > $99.00  →  SELL HYDROGEN QUICKLY
      • CO2       < $20.00  →  BUY CO2 QUICKLY
-5. Cooldown dedup  — each commodity alerts at most once every 6 hours per dip.
-6. Diagnostic mode — run with --debug to print full HTTP bodies to log file.
+5. Single Message   — maintains 1 message in #energy-alerts:
+     • Normal prices → silently edits (PATCH) the message with latest prices (no buzz)
+     • In-range      → deletes old message & posts new urgent alert (buzzes phone)
+6. Diagnostic mode  — run with --debug to print full HTTP bodies to log file.
 
 Usage
 -----
   python energy_fuel_notifier.py                # normal hourly radar check
   python energy_fuel_notifier.py --test-notify # send a test push to Discord
   python energy_fuel_notifier.py --debug       # verbose logging
-  python energy_fuel_notifier.py --force       # ignore cooldown and check
+  python energy_fuel_notifier.py --force       # run even if ENABLED=False
 ============================================================
 """
 
@@ -41,14 +43,14 @@ from typing import Any, Optional
 import requests
 from zoneinfo import ZoneInfo
 
-# Add the script's own dir to path so we can import discord_notifier
+# Add the script's own dir and repo root to path
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(HERE)
 for p in (HERE, PARENT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from discord_notifier import send_to_discord  # noqa: E402
+from discord_notifier import send_to_discord, upsert_to_discord  # noqa: E402
 
 # Force UTF-8 stdout (Windows terminals choke on emoji otherwise).
 if hasattr(sys.stdout, "reconfigure"):
@@ -72,14 +74,11 @@ LOG_FILE = os.path.join(HERE, "energy_notifier.log")
 EM_EMAIL = os.getenv("EM_EMAIL", "abhijaychauhan98@duck.com")
 EM_PASSWORD = os.getenv("EM_PASSWORD", "alok@singh")
 
-# --- Strict Emergency Thresholds ---
+# --- Strict Emergency Thresholds (NO COOLDOWN: alerts every time in range) ---
 OIL_BUY_THRESHOLD = 1.50          # Alert when Oil < $1.50
 COAL_BUY_THRESHOLD = 1.50         # Alert when Coal < $1.50
 HYDROGEN_SELL_THRESHOLD = 99.00   # Alert when Hydrogen > $99.00
 CO2_BUY_THRESHOLD = 20.00         # Alert when CO2 < $20.00
-
-# Don't re-alert the same commodity within this window.
-ALERT_COOLDOWN_SECONDS = 6 * 3600  # 6 hours
 
 # API endpoints.
 BASE_URL = "https://energymanagergame.com"
@@ -114,24 +113,20 @@ log = logging.getLogger("energy")
 #  STATE PERSISTENCE
 # ============================================================
 DEFAULT_STATE: dict[str, Any] = {
-    "oil_alerted_ts": None,
-    "coal_alerted_ts": None,
-    "hydrogen_alerted_ts": None,
-    "co2_alerted_ts": None,
+    "last_message_id": None,
 }
 
 
 def load_state() -> dict:
-    """Load persistent alert state, merging with defaults for forward-compat."""
+    """Load persistent state, merging with defaults."""
     state = dict(DEFAULT_STATE)
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                # Clean up legacy keys if present
-                for k in list(data.keys()):
-                    if k in state:
+                for k in state:
+                    if k in data:
                         state[k] = data[k]
         except Exception as e:
             log.warning(f"State file unreadable ({e}); using defaults.")
@@ -289,7 +284,7 @@ def fetch_live_commodity_prices(session: requests.Session, retries: int = 3, del
 
 
 # ============================================================
-#  NOTIFICATIONS
+#  NOTIFICATIONS & SINGLE-MESSAGE SYNC
 # ============================================================
 def send_test_notification() -> bool:
     log.info("Sending TEST notification to Discord #energy-alerts webhook...")
@@ -298,7 +293,7 @@ def send_test_notification() -> bool:
             "✅ **Test from Energy Manager 24/7 Live Radar.**\n\n"
             "If you see this in your #energy-alerts channel, your Energy "
             "webhook + script work.\n\n"
-            "Thresholds active:\n"
+            "Thresholds active (no cooldown — alerts every time in range):\n"
             f"• Oil < ${OIL_BUY_THRESHOLD:.2f}\n"
             f"• Coal < ${COAL_BUY_THRESHOLD:.2f}\n"
             f"• Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f}\n"
@@ -309,58 +304,93 @@ def send_test_notification() -> bool:
     )
 
 
-# ============================================================
-#  EMERGENCY CHECKS
-# ============================================================
-def _within_cooldown(state: dict, key: str) -> bool:
-    ts = state.get(f"{key}_alerted_ts")
-    if not ts:
-        return False
-    age = time.time() - ts
-    if age < ALERT_COOLDOWN_SECONDS:
-        log.debug(f"{key}: in cooldown ({age/60:.1f} min since last alert).")
-        return True
-    return False
+COMMODITY_SPECS = [
+    ("oil",      "Oil",      OIL_BUY_THRESHOLD,       "below", "<", "BUY OIL QUICKLY",        "🛢️"),
+    ("coal",     "Coal",     COAL_BUY_THRESHOLD,      "below", "<", "BUY COAL QUICKLY",       "🪨"),
+    ("hydrogen", "Hydrogen", HYDROGEN_SELL_THRESHOLD, "above", ">", "SELL HYDROGEN QUICKLY",  "💧"),
+    ("co2",      "CO2",      CO2_BUY_THRESHOLD,       "below", "<", "BUY CO2 QUICKLY",        "🍃"),
+]
 
 
-def check_emergency_conditions(market: dict, state: dict, current_time_12h: str) -> tuple[dict, int]:
-    """Send one emergency alert per dip, strictly silent otherwise."""
-    alerts_sent = 0
-
-    checks = [
-        ("oil",      OIL_BUY_THRESHOLD,       "below", "BUY OIL QUICKLY",        "🛢️", "rotating_light,fuelpump,warning",     "Oil price crashed below your $1.50 buy threshold!"),
-        ("coal",     COAL_BUY_THRESHOLD,      "below", "BUY COAL QUICKLY",      "🪨", "rotating_light,fire,warning",       "Coal price crashed below your $1.50 buy threshold!"),
-        ("hydrogen", HYDROGEN_SELL_THRESHOLD, "above", "SELL HYDROGEN QUICKLY", "💧", "rotating_light,money_with_wings,zap", "Hydrogen surged past your $99 sell target!"),
-        ("co2",      CO2_BUY_THRESHOLD,        "below", "BUY CO2 QUICKLY",       "🍃", "rotating_light,recycle,warning",     "CO2 quota price dropped below your target!"),
-    ]
-
-    for key, threshold, direction, action, emoji, tags, summary in checks:
+def _format_live_snapshot(market: dict) -> list[str]:
+    lines = []
+    for key, label, threshold, direction, op, _, emoji in COMMODITY_SPECS:
         if key not in market:
             continue
         price = market[key]["current"]
-        triggered = (price < threshold) if direction == "below" else (price > threshold)
+        lines.append(f"• {emoji} **{label}:** **${price:.2f}** *(Target: {op} ${threshold:.2f})*")
+    return lines
 
-        if triggered:
-            if _within_cooldown(state, key):
-                log.info(f"{key}: triggered (${price:.2f}) but in cooldown. Skipping duplicate.")
-                continue
+
+def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tuple[dict, int]:
+    """Update the single Discord message in #energy-alerts.
+
+    - If any commodity is in target range (NO cooldown): deletes old message and
+      POSTs a fresh red urgent alert so your phone buzzes every time.
+    - If all commodities are normal: silently PATCHes the single message with
+      the latest live prices (zero push notification).
+    """
+    triggered = []
+    for key, label, threshold, direction, op, action, emoji in COMMODITY_SPECS:
+        if key not in market:
+            continue
+        price = market[key]["current"]
+        is_hit = (price < threshold) if direction == "below" else (price > threshold)
+        if is_hit:
+            triggered.append((key, label, threshold, direction, op, action, emoji, price))
+
+    snapshot_lines = _format_live_snapshot(market)
+
+    if triggered:
+        if len(triggered) == 1:
+            _, label, threshold, direction, _, action, emoji, price = triggered[0]
             title = f"{action} (${price:.2f})"
-            msg = (
-                f"🚨 **{emoji} {action}!**\n"
-                f"💰 **Current Price:** **${price:.2f}** *(Target: {direction} ${threshold:.2f})*\n"
-                f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n"
-                f"🎯 **Action:** {summary}\n"
-                f"👉 Open **Energy Manager** and act now!"
-            )
-            if send_to_discord(message=msg, title=title, tags=tags, priority="urgent"):
-                state[f"{key}_alerted_ts"] = time.time()
-                alerts_sent += 1
+            header = f"🚨 **{emoji} {action}!**\n💰 **Current {label}:** **${price:.2f}** *(Target: {direction} ${threshold:.2f})*"
         else:
-            if state.get(f"{key}_alerted_ts") is not None:
-                log.info(f"{key}: normalized (${price:.2f}). Clearing alert marker.")
-                state[f"{key}_alerted_ts"] = None
+            names = " & ".join(t[1] for t in triggered)
+            title = f"{len(triggered)} ENERGY ALERTS: {names}"
+            hit_lines = [
+                f"• {t[6]} **{t[5]}:** **${t[7]:.2f}** *(Target: {t[4]} ${t[2]:.2f})*"
+                for t in triggered
+            ]
+            header = "🚨 **MULTIPLE ENERGY TARGETS HIT!**\n" + "\n".join(hit_lines)
 
-    return state, alerts_sent
+        msg = (
+            f"{header}\n"
+            f"⏰ **Detected At:** {current_time_12h} IST [LIVE]\n\n"
+            + "\n".join(snapshot_lines)
+            + "\n👉 Open **Energy Manager** and act now!"
+        )
+        ok, new_id = upsert_to_discord(
+            message=msg,
+            title=title,
+            priority="urgent",
+            message_id=state.get("last_message_id"),
+            notify=True,
+        )
+        if ok:
+            state["last_message_id"] = new_id
+            return state, len(triggered)
+        return state, 0
+
+    # All commodities outside range -> silently PATCH live status (zero buzz)
+    title = f"⚡ Energy Manager: Live Prices ({current_time_12h})"
+    msg = (
+        f"📊 **Live Market Status** ({current_time_12h} IST)\n"
+        + "\n".join(snapshot_lines)
+        + "\n⏳ Outside target range — monitoring every hour at :30."
+    )
+    ok, new_id = upsert_to_discord(
+        message=msg,
+        title=title,
+        priority="default",
+        message_id=state.get("last_message_id"),
+        notify=False,
+    )
+    if ok and new_id:
+        state["last_message_id"] = new_id
+
+    return state, 0
 
 
 # ============================================================
@@ -394,11 +424,12 @@ def main() -> int:
         now = datetime.datetime.now(LOCAL_TZ)
 
     current_time_12h = now.strftime("%I:%M %p")
+    state = load_state()
 
     log.info("=" * 60)
     log.info(" ⚡ Energy Manager 24/7 Live Tracker - abhijaysinghlimited")
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
-    log.info(" Mode : Silent Hourly Radar (Notifies ONLY when threshold breaches)")
+    log.info(" Mode : Single-Message Live Status + Alerts (NO Cooldown)")
     log.info(f" Targets: Oil < ${OIL_BUY_THRESHOLD:.2f} | Coal < ${COAL_BUY_THRESHOLD:.2f}")
     log.info(f"          Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f} | CO2 < ${CO2_BUY_THRESHOLD:.2f}")
     log.info("=" * 60)
@@ -408,7 +439,7 @@ def main() -> int:
     session = create_authenticated_session()
     if not session:
         log.error("Login failed.")
-        send_to_discord(
+        ok, new_id = upsert_to_discord(
             message=(
                 "⚠️ Energy Manager notifier could NOT log in.\n\n"
                 f"Account: `{EM_EMAIL}`\n"
@@ -416,7 +447,12 @@ def main() -> int:
             ),
             title="Energy Manager: LOGIN FAILED",
             priority="high",
+            message_id=state.get("last_message_id"),
+            notify=True,
         )
+        if ok and new_id:
+            state["last_message_id"] = new_id
+            save_state(state)
         return 3
 
     # 2. Fetch live prices
@@ -424,22 +460,26 @@ def main() -> int:
     market = fetch_live_commodity_prices(session)
     if not market:
         log.error("No market data retrieved.")
-        send_to_discord(
+        ok, new_id = upsert_to_discord(
             message="⚠️ Energy Manager notifier could not fetch live market prices.",
             title="Energy Manager: NO MARKET DATA",
             priority="high",
+            message_id=state.get("last_message_id"),
+            notify=True,
         )
+        if ok and new_id:
+            state["last_message_id"] = new_id
+            save_state(state)
         return 4
 
-    # 3. Emergency checks (silent unless breached)
-    state = load_state()
-    state, alerts_sent = check_emergency_conditions(market, state, current_time_12h)
+    # 3. Single-message update / alert (NO cooldown)
+    state, alerts_sent = sync_energy_message(market, state, current_time_12h)
     save_state(state)
 
     if alerts_sent == 0:
-        log.info("All commodities within normal range or in cooldown. Strictly silent.")
+        log.info("All commodities outside target range. Status message updated silently.")
 
-    log.info(f"Run complete. Alerts fired: {alerts_sent}.")
+    log.info(f"Run complete. Triggered items notified: {alerts_sent}.")
     return 0
 
 

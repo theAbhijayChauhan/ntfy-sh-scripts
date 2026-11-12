@@ -47,7 +47,7 @@ for p in (HERE, PARENT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from discord_notifier import send_to_discord  # noqa: E402
+from discord_notifier import send_to_discord, upsert_to_discord  # noqa: E402
 
 # Force UTF-8 stdout (Windows terminals choke on emoji otherwise).
 if hasattr(sys.stdout, "reconfigure"):
@@ -120,6 +120,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_run_ts": None,
     "last_fuel_price": None,
     "last_spot_price": None,
+    "last_message_id": None,
 }
 
 
@@ -278,71 +279,137 @@ def _within_cooldown(state: dict, key: str) -> bool:
     return (time.time() - ts) < ALERT_COOLDOWN_SECONDS
 
 
-def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str) -> tuple[dict, int]:
-    """Check fuel and spot against thresholds and alert if cheap."""
-    alerts_sent = 0
+def _fmt_price(val: Optional[float]) -> str:
+    return f"${val:,.0f}" if val is not None else "N/A"
 
+
+def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str) -> tuple[dict, int]:
+    """Evaluate Fuel & Spot thresholds and maintain 1 single message in #train-alerts.
+
+    - If any item is newly triggered (<= threshold and outside 30-min cooldown):
+      deletes old message & POSTs a fresh urgent red alert (buzzes phone).
+    - Otherwise (normal prices, or active dip still inside cooldown):
+      silently PATCHes the existing single message with the live values (no buzz).
+    """
     fuel = prices.get("fuel")
     spot = prices.get("spot")
 
-    # Log current market summary
     fuel_min = prices.get("fuel_min", "N/A")
     fuel_max = prices.get("fuel_max", "N/A")
     spot_min = prices.get("spot_min", "N/A")
     spot_max = prices.get("spot_max", "N/A")
 
+    fuel_str = _fmt_price(fuel)
+    spot_str = _fmt_price(spot)
+
     log.info(
         f"Live In-Game Prices: "
-        f"Fuel=${fuel:,.0f} (recent min=${fuel_min}, max=${fuel_max}), "
-        f"Spot=${spot:,.0f} (recent min=${spot_min}, max=${spot_max})"
+        f"Fuel={fuel_str} (recent min=${fuel_min}, max=${fuel_max}), "
+        f"Spot={spot_str} (recent min=${spot_min}, max=${spot_max})"
     )
 
-    # 1. FUEL CHECK (Fuel <= $2,800)
-    if fuel is not None:
-        if fuel <= FUEL_BUY_THRESHOLD:
-            if _within_cooldown(state, "fuel"):
-                log.info(f"Fuel: triggered (${fuel:,.0f}) but in cooldown. Skipping duplicate.")
-            else:
-                log.info(f"🚨 CRITICAL: Fuel price ${fuel:,.0f} <= ${FUEL_BUY_THRESHOLD:,.0f} threshold!")
-                title = f"BUY FUEL QUICKLY: ${fuel:,.0f} at {current_time_12h}"
-                msg = (
-                    f"🚨 **⛽ BUY FUEL QUICKLY • ROCK-BOTTOM NOW!**\n"
-                    f"💰 **Fuel Price:** **${fuel:,.0f}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
-                    f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                    f"⚡ **Spot Power:** ${spot:,.0f} / 1,000 kWh\n"
-                    f"👉 Open **Train Manager** and fill your tanks now!"
-                )
-                if send_to_discord(message=msg, title=title, priority="urgent"):
-                    state["fuel_alerted_ts"] = time.time()
-                    alerts_sent += 1
-        else:
-            # Normalized — clear alert marker so the NEXT dip alerts fresh
-            if state.get("fuel_alerted_ts") is not None:
-                log.info(f"Fuel normalized (${fuel:,.0f} > ${FUEL_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
-                state["fuel_alerted_ts"] = None
+    newly_triggered: list[str] = []
+    in_cooldown: list[str] = []
 
-    # 2. SPOT CHECK (Spot <= $600)
-    if spot is not None:
-        if spot <= SPOT_BUY_THRESHOLD:
-            if _within_cooldown(state, "spot"):
-                log.info(f"Spot: triggered (${spot:,.0f}) but in cooldown. Skipping duplicate.")
+    checks = [
+        ("fuel", fuel, FUEL_BUY_THRESHOLD),
+        ("spot", spot, SPOT_BUY_THRESHOLD),
+    ]
+    for key, val, threshold in checks:
+        if val is None:
+            continue
+        if val <= threshold:
+            if _within_cooldown(state, key):
+                log.info(f"{key.title()}: triggered ({_fmt_price(val)}) but in 30-min cooldown. Skipping buzz.")
+                in_cooldown.append(key)
             else:
-                log.info(f"🚨 CRITICAL: Spot price ${spot:,.0f} <= ${SPOT_BUY_THRESHOLD:,.0f} threshold!")
-                title = f"BUY SPOT QUICKLY: ${spot:,.0f} at {current_time_12h}"
-                msg = (
-                    f"🚨 **⚡ BUY SPOT POWER QUICKLY!**\n"
-                    f"⚡ **Spot Price:** **${spot:,.0f}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
-                    f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                    f"⛽ **Fuel Price:** ${fuel:,.0f} / 1,000 L\n"
-                    f"👉 Open **Train Manager** and lock your spot power now!"
-                )
-                if send_to_discord(message=msg, title=title, priority="urgent"):
-                    state["spot_alerted_ts"] = time.time()
-                    alerts_sent += 1
+                log.info(f"🚨 CRITICAL: {key.title()} price {_fmt_price(val)} <= ${threshold:,.0f} threshold!")
+                newly_triggered.append(key)
         else:
-            if state.get("spot_alerted_ts") is not None:
-                log.info(f"Spot normalized (${spot:,.0f} > ${SPOT_BUY_THRESHOLD:,.0f}). Resetting alert marker.")
-                state["spot_alerted_ts"] = None
+            if state.get(f"{key}_alerted_ts") is not None:
+                log.info(f"{key.title()} normalized ({_fmt_price(val)} > ${threshold:,.0f}). Resetting cooldown.")
+                state[f"{key}_alerted_ts"] = None
+
+    alerts_sent = 0
+    if newly_triggered:
+        if set(newly_triggered) == {"fuel", "spot"}:
+            title = f"BUY FUEL ({fuel_str}) & SPOT ({spot_str}) at {current_time_12h}"
+            msg = (
+                f"🚨 **⛽⚡ BUY FUEL & SPOT POWER QUICKLY!**\n"
+                f"💰 **Fuel Price:** **{fuel_str}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
+                f"⚡ **Spot Power:** **{spot_str}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
+                f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
+                f"👉 Open **Train Manager** and act now!"
+            )
+        elif "fuel" in newly_triggered:
+            title = f"BUY FUEL QUICKLY: {fuel_str} at {current_time_12h}"
+            msg = (
+                f"🚨 **⛽ BUY FUEL QUICKLY • ROCK-BOTTOM NOW!**\n"
+                f"💰 **Fuel Price:** **{fuel_str}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
+                f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
+                f"⚡ **Spot Power:** {spot_str} / 1,000 kWh\n"
+                f"👉 Open **Train Manager** and fill your tanks now!"
+            )
+        else:
+            title = f"BUY SPOT QUICKLY: {spot_str} at {current_time_12h}"
+            msg = (
+                f"🚨 **⚡ BUY SPOT POWER QUICKLY!**\n"
+                f"⚡ **Spot Price:** **{spot_str}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
+                f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
+                f"⛽ **Fuel Price:** {fuel_str} / 1,000 L\n"
+                f"👉 Open **Train Manager** and lock your spot power now!"
+            )
+
+        ok, new_id = upsert_to_discord(
+            message=msg,
+            title=title,
+            priority="urgent",
+            message_id=state.get("last_message_id"),
+            notify=True,
+        )
+        if ok:
+            now_ts = time.time()
+            for key in newly_triggered:
+                state[f"{key}_alerted_ts"] = now_ts
+            state["last_message_id"] = new_id
+            alerts_sent = len(newly_triggered)
+    elif in_cooldown:
+        # Still inside buy range during cooldown -> keep embed red, update values silently (zero buzz)
+        active_labels = " & ".join(k.upper() for k in in_cooldown)
+        title = f"ACTIVE BUY ZONE ({active_labels}) • Live at {current_time_12h}"
+        msg = (
+            f"🚨 **Active Buy Zone ({active_labels}) — In 30m Cooldown**\n"
+            f"• ⛽ **Fuel:** **{fuel_str}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
+            f"• ⚡ **Spot:** **{spot_str}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
+            f"⏰ **Updated:** {current_time_12h} [LIVE IN-GAME]"
+        )
+        ok, new_id = upsert_to_discord(
+            message=msg,
+            title=title,
+            priority="urgent",
+            message_id=state.get("last_message_id"),
+            notify=False,
+        )
+        if ok and new_id:
+            state["last_message_id"] = new_id
+    else:
+        # Outside buy range -> silently PATCH live status embed (zero buzz)
+        title = f"🚆 Train Manager: Live Prices ({current_time_12h})"
+        msg = (
+            f"📊 **Live In-Game Status** ({current_time_12h} IST)\n"
+            f"• ⛽ **Fuel:** {fuel_str} / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
+            f"• ⚡ **Spot:** {spot_str} / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
+            f"⏳ Outside buy range — monitoring every 15m."
+        )
+        ok, new_id = upsert_to_discord(
+            message=msg,
+            title=title,
+            priority="default",
+            message_id=state.get("last_message_id"),
+            notify=False,
+        )
+        if ok and new_id:
+            state["last_message_id"] = new_id
 
     # Record last prices
     state["last_fuel_price"] = fuel
@@ -390,6 +457,7 @@ def main() -> int:
 
     now = datetime.datetime.now(LOCAL_TZ)
     current_time_12h = now.strftime("%I:%M %p")
+    state = load_state()
 
     log.info("=" * 60)
     log.info(" 🚆 Train Manager 24/7 Live Radar - abhijaysinghlimited")
@@ -402,7 +470,7 @@ def main() -> int:
     session = create_authenticated_session()
     if not session:
         log.error("Login to trainmanager.cc failed.")
-        send_to_discord(
+        ok, new_id = upsert_to_discord(
             message=(
                 "⚠️ Train Manager notifier could NOT log in to trainmanager.cc.\n\n"
                 f"Account: `{TM_EMAIL}`\n"
@@ -410,7 +478,12 @@ def main() -> int:
             ),
             title="Train Manager: LOGIN FAILED",
             priority="high",
+            message_id=state.get("last_message_id"),
+            notify=True,
         )
+        if ok and new_id:
+            state["last_message_id"] = new_id
+            save_state(state)
         return 3
 
     # 2. Fetch live in-game prices
@@ -418,23 +491,27 @@ def main() -> int:
     prices = fetch_live_train_prices(session)
     if "fuel" not in prices and "spot" not in prices:
         log.error("Could not parse fuel or spot prices from trainmanager.cc.")
-        send_to_discord(
+        ok, new_id = upsert_to_discord(
             message=(
                 "⚠️ Train Manager could not read fuel/spot prices from trainmanager.cc.\n"
                 "Game layout may have changed."
             ),
             title="Train Manager: PARSE ERROR",
             priority="high",
+            message_id=state.get("last_message_id"),
+            notify=True,
         )
+        if ok and new_id:
+            state["last_message_id"] = new_id
+            save_state(state)
         return 4
 
-    # 3. Check thresholds & alert
-    state = load_state()
+    # 3. Check thresholds & sync single Discord message
     state, alerts_sent = check_emergency_conditions(prices, state, current_time_12h)
     save_state(state)
 
     if alerts_sent == 0:
-        log.info("Prices outside buy range or in cooldown. Strictly silent.")
+        log.info("No new alerts needed; status message updated silently.")
 
     log.info(f"Run complete. Alerts fired: {alerts_sent}.")
     return 0
