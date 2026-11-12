@@ -12,10 +12,10 @@
 3. Timing Safety    — if triggered at :28 or :29, waits until :30:05 before fetching
    so it never checks old prices before the game refreshes.
 4. No Cooldown      — notifies EVERY time any commodity is in target range:
-     • Oil       < $1.50   →  BUY OIL QUICKLY
-     • Coal      < $1.50   →  BUY COAL QUICKLY
-     • Hydrogen  > $99.00  →  SELL HYDROGEN QUICKLY
-     • CO2       < $20.00  →  BUY CO2 QUICKLY
+     • Oil       <  $2.00   →  BUY OIL QUICKLY
+     • Coal      <  $1.50   →  BUY COAL QUICKLY
+     • Hydrogen  >  $99.00  →  SELL HYDROGEN QUICKLY
+     • CO2       <= $15.00  →  BUY CO2 QUICKLY
 5. Single Message   — maintains 1 message in #energy-alerts:
      • Normal prices → silently edits (PATCH) the message with latest prices (no buzz)
      • In-range      → deletes old message & posts new urgent alert (buzzes phone)
@@ -75,10 +75,10 @@ EM_EMAIL = os.getenv("EM_EMAIL", "abhijaychauhan98@duck.com")
 EM_PASSWORD = os.getenv("EM_PASSWORD", "alok@singh")
 
 # --- Strict Emergency Thresholds (NO COOLDOWN: alerts every time in range) ---
-OIL_BUY_THRESHOLD = 1.50          # Alert when Oil < $1.50
+OIL_BUY_THRESHOLD = 2.00          # Alert when Oil < $2.00
 COAL_BUY_THRESHOLD = 1.50         # Alert when Coal < $1.50
 HYDROGEN_SELL_THRESHOLD = 99.00   # Alert when Hydrogen > $99.00
-CO2_BUY_THRESHOLD = 20.00         # Alert when CO2 < $20.00
+CO2_BUY_THRESHOLD = 15.00         # Alert when CO2 <= $15.00
 
 # API endpoints.
 BASE_URL = "https://energymanagergame.com"
@@ -297,7 +297,7 @@ def send_test_notification() -> bool:
             f"• Oil < ${OIL_BUY_THRESHOLD:.2f}\n"
             f"• Coal < ${COAL_BUY_THRESHOLD:.2f}\n"
             f"• Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f}\n"
-            f"• CO2 < ${CO2_BUY_THRESHOLD:.2f}"
+            f"• CO2 <= ${CO2_BUY_THRESHOLD:.2f}"
         ),
         title="Energy Manager: TEST",
         priority="default",
@@ -305,11 +305,23 @@ def send_test_notification() -> bool:
 
 
 COMMODITY_SPECS = [
-    ("oil",      "Oil",      OIL_BUY_THRESHOLD,       "below", "<",  "BUY",  "🛢️"),
-    ("coal",     "Coal",     COAL_BUY_THRESHOLD,      "below", "<",  "BUY",  "🪨"),
-    ("hydrogen", "Hydrogen", HYDROGEN_SELL_THRESHOLD, "above", ">",  "SELL", "💧"),
-    ("co2",      "CO2",      CO2_BUY_THRESHOLD,       "below", "<",  "BUY",  "🍃"),
+    ("oil",      "Oil",      OIL_BUY_THRESHOLD,       "<",  "BUY",  "🛢️"),
+    ("coal",     "Coal",     COAL_BUY_THRESHOLD,      "<",  "BUY",  "🪨"),
+    ("hydrogen", "Hydrogen", HYDROGEN_SELL_THRESHOLD, ">",  "SELL", "💧"),
+    ("co2",      "CO2",      CO2_BUY_THRESHOLD,       "<=", "BUY",  "🍃"),
 ]
+
+
+def _matches_target(price: float, op: str, threshold: float) -> bool:
+    if op == "<":
+        return price < threshold
+    if op == "<=":
+        return price <= threshold
+    if op == ">":
+        return price > threshold
+    if op == ">=":
+        return price >= threshold
+    raise ValueError(f"Unsupported operator: {op}")
 
 
 def _format_commodity_line(
@@ -330,7 +342,7 @@ def _format_commodity_line(
 
 def _build_clean_sections(market: dict, triggered_keys: set[str]) -> list[str]:
     by_key = {}
-    for key, label, threshold, direction, op, action, emoji in COMMODITY_SPECS:
+    for key, label, threshold, op, action, emoji in COMMODITY_SPECS:
         if key not in market:
             continue
         price = market[key]["current"]
@@ -360,13 +372,12 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
       clean live prices (zero push notification).
     """
     triggered = []
-    for key, label, threshold, direction, op, action, emoji in COMMODITY_SPECS:
+    for key, label, threshold, op, action, emoji in COMMODITY_SPECS:
         if key not in market:
             continue
         price = market[key]["current"]
-        is_hit = (price < threshold) if direction == "below" else (price > threshold)
-        if is_hit:
-            triggered.append((key, label, threshold, direction, op, action, emoji, price))
+        if _matches_target(price, op, threshold):
+            triggered.append((key, label, threshold, op, action, emoji, price))
 
     triggered_keys = {t[0] for t in triggered}
     body_lines = _build_clean_sections(market, triggered_keys)
@@ -374,13 +385,13 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
 
     if triggered:
         if len(triggered) == 1:
-            _, label, _, _, _, action, _, price = triggered[0]
+            _, label, _, _, action, _, price = triggered[0]
             title = f"🚨 {action} {label} (${price:.2f})"
         else:
-            summary = " & ".join(f"{t[5]} {t[1]} (${t[7]:.2f})" for t in triggered)
+            summary = " & ".join(f"{t[4]} {t[1]} (${t[6]:.2f})" for t in triggered)
             title = f"🚨 {summary}"
 
-        has_sell = any(t[5] == "SELL" for t in triggered)
+        has_sell = any(t[4] == "SELL" for t in triggered)
         priority = "sell" if has_sell else "buy"
 
         msg = "\n".join(
@@ -462,7 +473,7 @@ def main() -> int:
     log.info(f" Time : {now.strftime('%Y-%m-%d %I:%M:%S %p')} ({TIMEZONE_NAME})")
     log.info(" Mode : Single-Message Live Status + Alerts (NO Cooldown)")
     log.info(f" Targets: Oil < ${OIL_BUY_THRESHOLD:.2f} | Coal < ${COAL_BUY_THRESHOLD:.2f}")
-    log.info(f"          Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f} | CO2 < ${CO2_BUY_THRESHOLD:.2f}")
+    log.info(f"          Hydrogen > ${HYDROGEN_SELL_THRESHOLD:.2f} | CO2 <= ${CO2_BUY_THRESHOLD:.2f}")
     log.info("=" * 60)
 
     # 1. Login
