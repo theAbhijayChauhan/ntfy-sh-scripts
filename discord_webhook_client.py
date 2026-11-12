@@ -21,6 +21,8 @@ PRIORITY_COLOR = {
     "default": 0x3498DB,  # blue
     "low": 0x95A5A6,      # gray
     "high": 0xF39C12,     # orange
+    "buy": 0x2ECC71,      # green
+    "sell": 0xE74C3C,     # red
     "urgent": 0xE74C3C,   # red
 }
 

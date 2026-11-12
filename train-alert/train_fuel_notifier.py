@@ -330,40 +330,37 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
                 log.info(f"{key.title()} normalized ({_fmt_price(val)} > ${threshold:,.0f}). Resetting cooldown.")
                 state[f"{key}_alerted_ts"] = None
 
+    now_unix = int(time.time())
+    fuel_in_range = fuel is not None and fuel <= FUEL_BUY_THRESHOLD
+    spot_in_range = spot is not None and spot <= SPOT_BUY_THRESHOLD
+
+    def _price_line(icon: str, label: str, val_str: str, threshold: float, in_range: bool, cooldown: bool = False) -> str:
+        if in_range:
+            suffix = " *(Cooldown)*" if cooldown else ""
+            return f"  - {icon} {label}: **{val_str}** 🟩 **`BUY`**{suffix}"
+        return f"  - {icon} {label}: **{val_str}** · `<= ${threshold:,.0f}`"
+
     alerts_sent = 0
     if newly_triggered:
         if set(newly_triggered) == {"fuel", "spot"}:
-            title = f"BUY FUEL ({fuel_str}) & SPOT ({spot_str}) at {current_time_12h}"
-            msg = (
-                f"🚨 **⛽⚡ BUY FUEL & SPOT POWER QUICKLY!**\n"
-                f"💰 **Fuel Price:** **{fuel_str}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
-                f"⚡ **Spot Power:** **{spot_str}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
-                f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                f"👉 Open **Train Manager** and act now!"
-            )
+            title = f"🚨 BUY Fuel ({fuel_str}) & Spot ({spot_str})"
         elif "fuel" in newly_triggered:
-            title = f"BUY FUEL QUICKLY: {fuel_str} at {current_time_12h}"
-            msg = (
-                f"🚨 **⛽ BUY FUEL QUICKLY • ROCK-BOTTOM NOW!**\n"
-                f"💰 **Fuel Price:** **{fuel_str}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
-                f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                f"⚡ **Spot Power:** {spot_str} / 1,000 kWh\n"
-                f"👉 Open **Train Manager** and fill your tanks now!"
-            )
+            title = f"🚨 BUY Fuel ({fuel_str})"
         else:
-            title = f"BUY SPOT QUICKLY: {spot_str} at {current_time_12h}"
-            msg = (
-                f"🚨 **⚡ BUY SPOT POWER QUICKLY!**\n"
-                f"⚡ **Spot Price:** **{spot_str}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
-                f"⏰ **Time:** {current_time_12h} [LIVE IN-GAME]\n"
-                f"⛽ **Fuel Price:** {fuel_str} / 1,000 L\n"
-                f"👉 Open **Train Manager** and lock your spot power now!"
-            )
+            title = f"🚨 BUY Spot ({spot_str})"
+
+        msg = "\n".join([
+            "- **Live In-Game Prices**",
+            _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, fuel_in_range),
+            _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, spot_in_range),
+            "- **Status**",
+            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST)",
+        ])
 
         ok, new_id = upsert_to_discord(
             message=msg,
             title=title,
-            priority="urgent",
+            priority="buy",
             message_id=state.get("last_message_id"),
             notify=True,
         )
@@ -374,19 +371,20 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
             state["last_message_id"] = new_id
             alerts_sent = len(newly_triggered)
     elif in_cooldown:
-        # Still inside buy range during cooldown -> keep embed red, update values silently (zero buzz)
-        active_labels = " & ".join(k.upper() for k in in_cooldown)
-        title = f"ACTIVE BUY ZONE ({active_labels}) • Live at {current_time_12h}"
-        msg = (
-            f"🚨 **Active Buy Zone ({active_labels}) — In 30m Cooldown**\n"
-            f"• ⛽ **Fuel:** **{fuel_str}** / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
-            f"• ⚡ **Spot:** **{spot_str}** / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
-            f"⏰ **Updated:** {current_time_12h} [LIVE IN-GAME]"
-        )
+        # Still inside buy range during cooldown -> keep green embed, update values silently (zero buzz)
+        active_labels = " & ".join(k.title() for k in in_cooldown)
+        title = f"🟢 Active Buy Zone • {active_labels}"
+        msg = "\n".join([
+            "- **Live In-Game Prices**",
+            _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, fuel_in_range, cooldown="fuel" in in_cooldown),
+            _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, spot_in_range, cooldown="spot" in in_cooldown),
+            "- **Status**",
+            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · 30m cooldown",
+        ])
         ok, new_id = upsert_to_discord(
             message=msg,
             title=title,
-            priority="urgent",
+            priority="buy",
             message_id=state.get("last_message_id"),
             notify=False,
         )
@@ -394,13 +392,14 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
             state["last_message_id"] = new_id
     else:
         # Outside buy range -> silently PATCH live status embed (zero buzz)
-        title = f"🚆 Train Manager: Live Prices ({current_time_12h})"
-        msg = (
-            f"📊 **Live In-Game Status** ({current_time_12h} IST)\n"
-            f"• ⛽ **Fuel:** {fuel_str} / 1,000 L *(Target: <= ${FUEL_BUY_THRESHOLD:,.0f})*\n"
-            f"• ⚡ **Spot:** {spot_str} / 1,000 kWh *(Target: <= ${SPOT_BUY_THRESHOLD:,.0f})*\n"
-            f"⏳ Outside buy range — monitoring every 15m."
-        )
+        title = "🚆 Train Manager • Live Prices"
+        msg = "\n".join([
+            "- **Live In-Game Prices**",
+            _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, False),
+            _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, False),
+            "- **Status**",
+            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · Every 15m",
+        ])
         ok, new_id = upsert_to_discord(
             message=msg,
             title=title,
