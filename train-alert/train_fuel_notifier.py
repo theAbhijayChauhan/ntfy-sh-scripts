@@ -336,47 +336,54 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
 
     def _price_line(icon: str, label: str, val_str: str, threshold: float, in_range: bool, cooldown: bool = False) -> str:
         if in_range:
-            badge = "✨ **`BUY NOW`** *(Cooldown)*" if cooldown else "✨ **`BUY NOW`**"
-            return f"  - {icon} **{label}:** **`{val_str}`** {badge}"
-        return f"  - {icon} {label}: **{val_str}** · `<= ${threshold:,.0f}`"
-
-    def _build_diff_banner(keys: list[str], cooldown: bool = False) -> str:
-        diff_lines = []
-        tag = " (30m cooldown)" if cooldown else ""
-        for k in keys:
-            if k == "fuel":
-                diff_lines.append(
-                    f"+ >>> BUY FUEL NOW: {fuel_str} (Target <= ${FUEL_BUY_THRESHOLD:,.0f}){tag} <<<"
-                )
-            else:
-                diff_lines.append(
-                    f"+ >>> BUY SPOT NOW: {spot_str} (Target <= ${SPOT_BUY_THRESHOLD:,.0f}){tag} <<<"
-                )
-        return "```diff\n" + "\n".join(diff_lines) + "\n```"
+            suffix = " *(30m cooldown)*" if cooldown else ""
+            return f"  - {icon} **{label}:** **`{val_str}`** 🟢 **BUY NOW**{suffix}"
+        return f"  - {icon} {label}: **{val_str}** · Target `<= ${threshold:,.0f}`"
 
     alerts_sent = 0
     if newly_triggered:
         if set(newly_triggered) == {"fuel", "spot"}:
             summary = f"BUY FUEL ({fuel_str}) & SPOT ({spot_str})"
+            title = f"🚨 {summary}"
+            ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
+            callout = [
+                "## 🟢 DUAL BUY TARGET HIT: FUEL & SPOT!",
+                f"> ⛽ **FUEL:** **`{fuel_str}`** *(Target <= ${FUEL_BUY_THRESHOLD:,.0f})* → **BUY NOW**",
+                f"> ⚡ **SPOT POWER:** **`{spot_str}`** *(Target <= ${SPOT_BUY_THRESHOLD:,.0f})* → **BUY NOW**",
+                "> 🚆 Open **Train Manager** and buy both now!",
+                "",
+            ]
         elif "fuel" in newly_triggered:
             summary = f"BUY FUEL NOW • {fuel_str}"
+            title = f"🚨 {summary}"
+            ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
+            callout = [
+                f"## 🟢 BUY TARGET HIT: ⛽ FUEL ({fuel_str})",
+                f"> 🎯 **Target:** Below `${FUEL_BUY_THRESHOLD:,.0f}` *(Current: **`{fuel_str}`** / 1,000 L)*",
+                "> 🚆 **Action:** Open **Train Manager** and fill tanks now!",
+                "",
+            ]
         else:
-            summary = f"BUY SPOT NOW • {spot_str}"
+            summary = f"BUY SPOT POWER NOW • {spot_str}"
+            title = f"🚨 {summary}"
+            ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
+            callout = [
+                f"## 🟢 BUY TARGET HIT: ⚡ SPOT POWER ({spot_str})",
+                f"> 🎯 **Target:** Below `${SPOT_BUY_THRESHOLD:,.0f}` *(Current: **`{spot_str}`** / 1,000 kWh)*",
+                "> ⚡ **Action:** Open **Train Manager** and lock spot power now!",
+                "",
+            ]
 
-        title = f"⚡ {summary}"
-        ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
-        banner = _build_diff_banner(newly_triggered, cooldown=False)
-
-        msg = "\n".join([
-            banner,
-            "> 🔥 **Buy target hit — open Train Manager and act now!**",
-            "",
-            "- **Live In-Game Prices**",
-            _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, fuel_in_range),
-            _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, spot_in_range),
-            "- **Status**",
-            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST)",
-        ])
+        msg = "\n".join(
+            callout
+            + [
+                "- **Live In-Game Prices**",
+                _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, fuel_in_range),
+                _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, spot_in_range),
+                "- **Status**",
+                f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST)",
+            ]
+        )
 
         ok, new_id = upsert_to_discord(
             message=msg,
@@ -393,20 +400,24 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
             state["last_message_id"] = new_id
             alerts_sent = len(newly_triggered)
     elif in_cooldown:
-        # Still inside buy range during cooldown -> keep glowing green banner, update silently (zero buzz)
+        # Still inside buy range during cooldown -> keep green embed, update silently (zero buzz)
         active_labels = " & ".join(k.upper() for k in in_cooldown)
-        title = f"⚡ ACTIVE BUY ZONE • {active_labels}"
-        banner = _build_diff_banner(in_cooldown, cooldown=True)
-        msg = "\n".join([
-            banner,
-            "> ⏳ **Still in buy zone** *(silently refreshing values during 30m cooldown)*",
+        title = f"🟢 Active Buy Zone • {active_labels}"
+        callout = [
+            f"## 🟢 ACTIVE BUY ZONE: {active_labels}",
+            "> ⏳ **Still in buy range** · Silently updating prices (30m cooldown active)",
             "",
-            "- **Live In-Game Prices**",
-            _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, fuel_in_range, cooldown="fuel" in in_cooldown),
-            _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, spot_in_range, cooldown="spot" in in_cooldown),
-            "- **Status**",
-            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · 30m cooldown",
-        ])
+        ]
+        msg = "\n".join(
+            callout
+            + [
+                "- **Live In-Game Prices**",
+                _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, fuel_in_range, cooldown="fuel" in in_cooldown),
+                _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, spot_in_range, cooldown="spot" in in_cooldown),
+                "- **Status**",
+                f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · 30m cooldown",
+            ]
+        )
         ok, new_id = upsert_to_discord(
             message=msg,
             title=title,
@@ -424,7 +435,7 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
             _price_line("⛽", "Fuel", fuel_str, FUEL_BUY_THRESHOLD, False),
             _price_line("⚡", "Spot Power", spot_str, SPOT_BUY_THRESHOLD, False),
             "- **Status**",
-            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · Every 15m",
+            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · Outside buy range · Every 15m",
         ])
         ok, new_id = upsert_to_discord(
             message=msg,

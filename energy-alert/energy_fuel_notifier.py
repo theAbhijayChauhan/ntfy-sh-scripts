@@ -335,9 +335,9 @@ def _format_commodity_line(
     is_hit: bool,
 ) -> str:
     if is_hit:
-        badge = "✨ **`BUY NOW`**" if action == "BUY" else "🔥 **`SELL NOW`**"
+        badge = "🟢 **BUY NOW**" if action == "BUY" else "🔴 **SELL NOW**"
         return f"  - {emoji} **{label}:** **`${price:.2f}`** {badge}"
-    return f"  - {emoji} {label}: **${price:.2f}** · `{op} ${threshold:.2f}`"
+    return f"  - {emoji} {label}: **${price:.2f}** · Target `{op} ${threshold:.2f}`"
 
 
 def _build_clean_sections(market: dict, triggered_keys: set[str]) -> list[str]:
@@ -367,7 +367,7 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
     """Update the single Discord message in #energy-alerts.
 
     - If any commodity is in target range (NO cooldown): deletes old message and
-      POSTs a fresh @everyone glowing alert (green BUY / red SELL) so your phone buzzes every time.
+      POSTs a fresh @everyone alert (green BUY / red SELL) so your phone buzzes every time.
     - If all commodities are normal: silently PATCHes the single message with
       clean live prices (zero push notification).
     """
@@ -385,35 +385,41 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
 
     if triggered:
         if len(triggered) == 1:
-            _, label, _, _, action, _, price = triggered[0]
-            summary = f"{action} {label.upper()} NOW • ${price:.2f}"
+            _, label, threshold, op, action, emoji, price = triggered[0]
+            title = f"🚨 {action} {label.upper()} NOW • ${price:.2f}"
+            ping_content = f"@everyone 🚨 **{action} {label.upper()} NOW • ${price:.2f}** — open Energy Manager!"
+            circle = "🟢" if action == "BUY" else "🔴"
+            action_verb = "fill oil reserves" if key == "oil" else ("buy coal" if key == "coal" else ("buy CO2 quota" if key == "co2" else "sell hydrogen at peak"))
+            callout = [
+                f"## {circle} {action} TARGET HIT: {emoji} {label.upper()} (${price:.2f})",
+                f"> 🎯 **Target:** {op} `${threshold:.2f}` *(Current: **`${price:.2f}`**)*",
+                f"> ⚡ **Action:** Open **Energy Manager** and {action_verb} now!",
+                "",
+            ]
         else:
             summary = " & ".join(f"{t[4]} {t[1]} (${t[6]:.2f})" for t in triggered)
-
-        title = f"⚡ {summary}"
-        ping_content = f"@everyone 🚨 **{summary}** — open Energy Manager!"
-
-        diff_lines = []
-        for _, label, threshold, op, action, _, price in triggered:
-            prefix = "+" if action == "BUY" else "-"
-            diff_lines.append(
-                f"{prefix} >>> {action} {label.upper()} NOW: ${price:.2f} (Target {op} ${threshold:.2f}) <<<"
-            )
-        banner = "```diff\n" + "\n".join(diff_lines) + "\n```"
+            title = f"🚨 MULTIPLE TARGETS: {summary}"
+            ping_content = f"@everyone 🚨 **{summary}** — open Energy Manager!"
+            callout_lines = [
+                f"> {'🟢' if t[4] == 'BUY' else '🔴'} **{t[4]} {t[1].upper()}:** **`${t[6]:.2f}`** *(Target {t[3]} ${t[2]:.2f})*"
+                for t in triggered
+            ]
+            callout = [
+                "## 🚨 MULTIPLE TARGETS IN RANGE!",
+            ] + callout_lines + [
+                "> ⚡ Open **Energy Manager** and take action now!",
+                "",
+            ]
 
         has_sell = any(t[4] == "SELL" for t in triggered)
         priority = "sell" if has_sell else "buy"
 
         msg = "\n".join(
-            [
-                banner,
-                "> 🔥 **Market target hit — open Energy Manager and act now!**",
-                "",
-            ]
+            callout
             + body_lines
             + [
                 "- **Status**",
-                f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST)",
+                f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · Hourly at `:30`",
             ]
         )
         ok, new_id = upsert_to_discord(
@@ -430,12 +436,12 @@ def sync_energy_message(market: dict, state: dict, current_time_12h: str) -> tup
         return state, 0
 
     # All commodities outside range -> silently PATCH live status (zero buzz)
-    title = f"⚡ Energy Manager • Live Prices"
+    title = "⚡ Energy Manager • Live Prices"
     msg = "\n".join(
         body_lines
         + [
             "- **Status**",
-            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · Hourly at `:30`",
+            f"  - 🕒 Checked <t:{now_unix}:R> ({current_time_12h} IST) · Outside target range · Hourly at `:30`",
         ]
     )
     ok, new_id = upsert_to_discord(
