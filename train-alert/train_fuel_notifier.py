@@ -345,7 +345,10 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
         if set(newly_triggered) == {"fuel", "spot"}:
             summary = f"BUY FUEL ({fuel_str}) & SPOT ({spot_str})"
             title = f"🚨 {summary}"
-            ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
+            ping_content = (
+                f"@everyone 🚨 🟢 BUY FUEL ({fuel_str} vs <={FUEL_BUY_THRESHOLD:,.0f}) & "
+                f"SPOT ({spot_str} vs <={SPOT_BUY_THRESHOLD:,.0f}) ✨ Open Train Manager & buy both now!"
+            )
             callout = [
                 "## 🟢 DUAL BUY TARGET HIT: FUEL & SPOT!",
                 f"> ⛽ **FUEL:** **`{fuel_str}`** *(Target <= ${FUEL_BUY_THRESHOLD:,.0f})* → **BUY NOW**",
@@ -356,7 +359,10 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
         elif "fuel" in newly_triggered:
             summary = f"BUY FUEL NOW • {fuel_str}"
             title = f"🚨 {summary}"
-            ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
+            ping_content = (
+                f"@everyone 🚨 🟢 BUY FUEL NOW • {fuel_str} "
+                f"(Target: <= ${FUEL_BUY_THRESHOLD:,.0f}) ✨ Open Train Manager & fill tanks now!"
+            )
             callout = [
                 f"## 🟢 BUY TARGET HIT: ⛽ FUEL ({fuel_str})",
                 f"> 🎯 **Target:** Below `${FUEL_BUY_THRESHOLD:,.0f}` *(Current: **`{fuel_str}`** / 1,000 L)*",
@@ -366,7 +372,10 @@ def check_emergency_conditions(prices: dict, state: dict, current_time_12h: str)
         else:
             summary = f"BUY SPOT POWER NOW • {spot_str}"
             title = f"🚨 {summary}"
-            ping_content = f"@everyone 🚨 **{summary}** — open Train Manager!"
+            ping_content = (
+                f"@everyone 🚨 🟢 BUY SPOT POWER NOW • {spot_str} "
+                f"(Target: <= ${SPOT_BUY_THRESHOLD:,.0f}) ✨ Open Train Manager & lock spot power now!"
+            )
             callout = [
                 f"## 🟢 BUY TARGET HIT: ⚡ SPOT POWER ({spot_str})",
                 f"> 🎯 **Target:** Below `${SPOT_BUY_THRESHOLD:,.0f}` *(Current: **`{spot_str}`** / 1,000 kWh)*",
